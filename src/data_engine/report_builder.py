@@ -214,7 +214,7 @@ def _load_trucost() -> pd.DataFrame:
 
 
 def _load_factset_trucost_bridge() -> pd.DataFrame:
-    path = OUT_DIR / "common_factset_trucost_cdp_tickers_extended.csv"
+    path = OUT_DIR / "common_companies_by_year_cdp_trucost_factset_lseg_with_trucost_emissions.csv"
     if not path.exists():
         return pd.DataFrame()
     bridge = pd.read_csv(

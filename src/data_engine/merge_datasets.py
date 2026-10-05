@@ -386,14 +386,14 @@ def load_lseg_presence(lseg_root: Path) -> pd.DataFrame:
 
 
 def load_trucost_emissions(trucost_root: Path) -> pd.DataFrame:
-    ghg_path = trucost_root / "260710 trucost pulic-ghg-2011to24.csv"
+    ghg_path = trucost_root / "260710 trucost pulic-ghg-2011to24.dta"
     if not ghg_path.exists():
         raise FileNotFoundError(f"Trucost emissions file not found: {ghg_path}")
 
-    hdr = pd.read_csv(ghg_path, nrows=0)
+    hdr = pd.read_stata(ghg_path, nrows=0)
     di_cols = [c for c in hdr.columns if c.lower().startswith("di_")]
     keep_cols = [c for c in ["companyid", "fiscalyear", "companyname", "ticker", "gvkey"] if c in hdr.columns] + di_cols
-    df = pd.read_csv(ghg_path, usecols=keep_cols, low_memory=False)
+    df = pd.read_stata(ghg_path, usecols=keep_cols)
 
     df["year"] = df["fiscalyear"].map(_clean_year)
     df["trucost_companyid_key"] = df["companyid"].map(_clean_company_id)
@@ -529,12 +529,6 @@ def build_unique_company_universe_by_year(merged_df: pd.DataFrame, cdp_root: Pat
 def main() -> None:
     parser = argparse.ArgumentParser(description="Combined merge pipeline: Trucost/FactSet rematch + CDP score refresh + yearly unique name universe.")
     parser.add_argument(
-        "--input",
-        type=Path,
-        default=Path(r"/data/processed/common_factset_trucost_cdp_tickers_extended.csv"),
-        help="Input merged CSV path",
-    )
-    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -549,7 +543,7 @@ def main() -> None:
     parser.add_argument(
         "--unique-output",
         type=Path,
-        default=Path(r"/data/processed/unique_company_names_by_year_trucost_factset_cdp.csv"),
+        default=Path(r"/data/processed/unique_company_names_by_year_trucost_factset_lseg_cdp.csv"),
         help="Output CSV for unique company names by source and year",
     )
     parser.add_argument(

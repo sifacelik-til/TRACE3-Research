@@ -68,8 +68,8 @@ def load_common_mapping():
     """Load FactSet-Trucost-CDP mapping."""
     try:
         # Try data/outputs first, then data/processed
-        output_file = Path("data/outputs/common_factset_trucost_cdp_tickers_extended.csv")
-        processed_file = Path("data/processed/common_factset_trucost_cdp_tickers_extended.csv")
+        output_file = Path("data/outputs/common_companies_by_year_cdp_trucost_factset_lseg_with_trucost_emissions.csv")
+        processed_file = Path("data/processed/common_companies_by_year_cdp_trucost_factset_lseg_with_trucost_emissions.csv")
         
         if output_file.exists():
             df = pd.read_csv(output_file)

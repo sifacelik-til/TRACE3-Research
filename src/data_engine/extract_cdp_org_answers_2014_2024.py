@@ -29,7 +29,16 @@ FACTSET_ENTITY_PATH = Path(__file__).resolve().parent.parent / "data" / "raw" / 
 QUESTION_CODE_RE = re.compile(r"^(CC?\d+(?:\.\d+)*[a-z]?)", re.IGNORECASE)
 LEGACY_COL_CODE_RE = re.compile(r"^(CC?\d+(?:\.\d+)*[a-z]?)_C\d+_", re.IGNORECASE)
 
-from data_engine.cdp_theme_taxonomy import THEME_PATTERNS, QUESTION_CODE_THEMES
+try:
+    from .cdp_theme_taxonomy import THEME_PATTERNS, QUESTION_CODE_THEMES
+except ImportError:
+    try:
+        from data_engine.cdp_theme_taxonomy import (
+            THEME_PATTERNS,
+            QUESTION_CODE_THEMES,
+        )
+    except ModuleNotFoundError:
+        from cdp_theme_taxonomy import THEME_PATTERNS, QUESTION_CODE_THEMES
 
 
 def normalize_text(value: object) -> str:
@@ -73,11 +82,24 @@ def resolve_org_name_from_factset_id(factset_id: str, path: Path = FACTSET_ENTIT
 
 
 def parse_year_file(year_dir: Path) -> Optional[Path]:
+    """Return the primary Climate Change response file for one CDP year.
+
+    Newer CDP releases contain several disclosure themes and frequently contain
+    duplicate delivery folders. Selecting the first ``responses`` Parquet
+    recursively can therefore select Biodiversity or Integrated Questions.
+    """
     if not year_dir.exists():
         return None
 
-    if year_dir.name == "2024":
-        parquet_candidates = list(year_dir.rglob("*responses*.parquet"))
+    if year_dir.name in {"2024", "2025"}:
+        parquet_candidates = [
+            path
+            for path in year_dir.rglob("*responses*.parquet")
+            if (
+                "climate change" in str(path.parent).lower()
+                or "_c_isin_" in path.name.lower()
+            )
+        ]
         if parquet_candidates:
             return sorted(parquet_candidates)[0]
 
@@ -121,7 +143,9 @@ def is_missing(value: object) -> bool:
     text = str(value).strip()
     if not text:
         return True
-    if text.lower() in {"nan", "none", "null", "n/a", "not applicable"}:
+    # CDP uses N/A and "Not applicable" as valid selected responses. Keep
+    # them in the output; only values representing a missing cell are omitted.
+    if text.lower() in {"nan", "none", "null"}:
         return True
     return False
 
@@ -360,6 +384,185 @@ def extract_from_legacy_xlsx(
     return records, matched_org_labels
 
 
+def extract_many_from_legacy_xlsx(
+    year: int, file_path: Path, org_names: Sequence[str]
+) -> Tuple[List[Dict[str, object]], Dict[str, List[str]]]:
+    """Extract one CDP workbook for many organizations in a single scan."""
+    wb = load_workbook(file_path, read_only=True, data_only=True)
+    sheet_names = wb.sheetnames
+    summary_sheet_name = (
+        "Summary Data"
+        if "Summary Data" in sheet_names
+        else ("Summary" if "Summary" in sheet_names else None)
+    )
+    targets = [name for name in dict.fromkeys(org_names) if normalize_text(name)]
+    matched_by_target: Dict[str, List[str]] = {name: [] for name in targets}
+    target_by_account: Dict[str, str] = {}
+    target_by_org_norm: Dict[str, str] = {}
+
+    if summary_sheet_name:
+        ws = wb[summary_sheet_name]
+        header_row = find_header_row(ws)
+        headers = [
+            ws.cell(row=header_row, column=c).value
+            for c in range(1, ws.max_column + 1)
+        ]
+        headers_str = ["" if value is None else str(value) for value in headers]
+        org_idx = get_col_idx(
+            headers_str,
+            ("organization", "organisation", "response organisation"),
+        )
+        acct_idx = get_col_idx(
+            headers_str, ("account number", "account no", "account")
+        )
+        if org_idx is not None:
+            org_values = []
+            acct_values = []
+            for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+                org_values.append(row[org_idx] if org_idx < len(row) else None)
+                acct_values.append(
+                    row[acct_idx]
+                    if acct_idx is not None and acct_idx < len(row)
+                    else None
+                )
+            for target in targets:
+                matched_idx, labels = match_org_rows(org_values, target)
+                matched_by_target[target] = labels
+                for index in matched_idx:
+                    org_norm = normalize_text(org_values[index])
+                    if org_norm:
+                        target_by_org_norm.setdefault(org_norm, target)
+                    account = acct_values[index]
+                    if account is not None and str(account).strip():
+                        target_by_account.setdefault(str(account).strip(), target)
+
+    records: List[Dict[str, object]] = []
+    metadata_terms = (
+        "account number",
+        "account no",
+        "organisation",
+        "organization",
+        "country",
+        "access",
+        "public",
+        "samples",
+        "response received date",
+        "activities",
+        "sectors",
+        "industries",
+        "primary activity",
+        "primary sector",
+        "primary industry",
+        "primary questionnaire sector",
+        "ticker",
+        "isin",
+        "row",
+        "rowname",
+        "region",
+        "status",
+        "submitted date",
+        "invitation status",
+        "request response status",
+        "attachments",
+        "complexity",
+        "version",
+        "back to index",
+    )
+    for sheet_name in sheet_names:
+        low_sheet = sheet_name.lower()
+        if low_sheet in {"criteria", "response language"}:
+            continue
+        if low_sheet.startswith("summary"):
+            continue
+
+        ws = wb[sheet_name]
+        header_row = find_header_row(ws)
+        header_values = [
+            ws.cell(row=header_row, column=c).value
+            for c in range(1, ws.max_column + 1)
+        ]
+        headers = [
+            "" if value is None else str(value).strip()
+            for value in header_values
+        ]
+        org_idx = get_col_idx(
+            headers, ("organization", "organisation", "response organisation")
+        )
+        acct_idx = get_col_idx(
+            headers, ("account number", "account no", "account")
+        )
+        rowname_idx = get_col_idx(headers, ("rowname",))
+        answer_col_idxs = [
+            index
+            for index, column_name in enumerate(headers)
+            if column_name
+            and not any(
+                term in normalize_text(column_name) for term in metadata_terms
+            )
+        ]
+        if not answer_col_idxs:
+            continue
+
+        for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+            org_value = (
+                row[org_idx]
+                if org_idx is not None and org_idx < len(row)
+                else None
+            )
+            account_value = (
+                row[acct_idx]
+                if acct_idx is not None and acct_idx < len(row)
+                else None
+            )
+            account_key = (
+                str(account_value).strip() if account_value is not None else ""
+            )
+            requested_org = target_by_account.get(account_key)
+            if requested_org is None:
+                requested_org = target_by_org_norm.get(normalize_text(org_value))
+            if requested_org is None:
+                continue
+            row_name = (
+                row[rowname_idx]
+                if rowname_idx is not None and rowname_idx < len(row)
+                else None
+            )
+            for index in answer_col_idxs:
+                if index >= len(row) or is_missing(row[index]):
+                    continue
+                answer = row[index]
+                column_header = headers[index]
+                question_code = extract_question_code(
+                    sheet_name=sheet_name, column_header=column_header
+                )
+                question_text = parse_legacy_column_text(column_header)
+                theme_tags = categorize_theme(
+                    sheet_name=sheet_name,
+                    question_text=question_text,
+                    answer=answer,
+                )
+                records.append(
+                    {
+                        "year": year,
+                        "source": "legacy_xlsx",
+                        "source_file": str(file_path),
+                        "requested_org_name": requested_org,
+                        "org_name_matched": org_value,
+                        "question_sheet": sheet_name,
+                        "question_code": question_code,
+                        "question_key": canonical_question_key(question_code),
+                        "question_text": question_text,
+                        "row_name": row_name,
+                        "column_header": column_header,
+                        "answer": answer,
+                        "theme_tags": " | ".join(theme_tags),
+                        "primary_theme": primary_theme(theme_tags),
+                    }
+                )
+    wb.close()
+    return records, matched_by_target
+
+
 def extract_from_2024_parquet(
     year: int, file_path: Path, org_name: str
 ) -> Tuple[List[Dict[str, object]], List[str]]:
@@ -420,6 +623,98 @@ def extract_from_2024_parquet(
             }
         )
     return out, matched_labels
+
+
+def extract_many_from_2024_parquet(
+    year: int, file_path: Path, org_names: Sequence[str]
+) -> Tuple[List[Dict[str, object]], Dict[str, List[str]]]:
+    """Extract one CDP response parquet for many organizations."""
+    df = pd.read_parquet(file_path)
+    if "disclosing_organization" not in df.columns:
+        raise ValueError(
+            f"'disclosing_organization' column missing in {file_path}"
+        )
+    df = df.copy()
+    df["org_norm"] = df["disclosing_organization"].map(normalize_text)
+    unique_orgs = sorted(df["org_norm"].dropna().unique().tolist())
+    matched_parts = []
+    matched_by_target: Dict[str, List[str]] = {}
+    for org_name in dict.fromkeys(org_names):
+        target = normalize_text(org_name)
+        mask = (
+            df["org_norm"].eq(target)
+            | df["org_norm"].str.contains(re.escape(target), na=False)
+            | df["org_norm"].map(lambda value: bool(value) and value in target)
+        )
+        matched = df[mask].copy()
+        if matched.empty:
+            nearest = get_close_matches(target, unique_orgs, n=1, cutoff=0.86)
+            if nearest:
+                matched = df[df["org_norm"].isin(nearest)].copy()
+        labels = sorted(
+            matched["disclosing_organization"]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        )
+        matched_by_target[org_name] = labels
+        if not matched.empty:
+            matched["requested_org_name"] = org_name
+            matched_parts.append(matched)
+
+    if not matched_parts:
+        return [], matched_by_target
+    matched = pd.concat(matched_parts, ignore_index=True)
+    use_cols = [
+        column
+        for column in [
+            "question_number",
+            "question_text",
+            "row_name",
+            "column_header",
+            "content_full",
+        ]
+        if column in matched.columns
+    ]
+    records: List[Dict[str, object]] = []
+    for row in matched[
+        ["requested_org_name", "disclosing_organization", *use_cols]
+    ].itertuples(index=False):
+        row_dict = row._asdict()
+        answer = row_dict.get("content_full")
+        if is_missing(answer):
+            continue
+        question_number = str(row_dict.get("question_number", "") or "")
+        question_text = str(row_dict.get("question_text", "") or "")
+        question_code = extract_question_code(
+            sheet_name=question_number,
+            column_header=question_number or question_text,
+        )
+        theme_tags = categorize_theme(
+            sheet_name=question_number,
+            question_text=question_text,
+            answer=answer,
+        )
+        records.append(
+            {
+                "year": year,
+                "source": "responses_parquet",
+                "source_file": str(file_path),
+                "requested_org_name": row_dict.get("requested_org_name"),
+                "org_name_matched": row_dict.get("disclosing_organization"),
+                "question_sheet": question_number,
+                "question_code": question_code,
+                "question_key": canonical_question_key(question_code),
+                "question_text": question_text,
+                "row_name": row_dict.get("row_name"),
+                "column_header": row_dict.get("column_header"),
+                "answer": answer,
+                "theme_tags": " | ".join(theme_tags),
+                "primary_theme": primary_theme(theme_tags),
+            }
+        )
+    return records, matched_by_target
 
 
 def build_question_matched_table(df_long: pd.DataFrame, start_year: int, end_year: int) -> pd.DataFrame:

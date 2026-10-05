@@ -58,7 +58,7 @@ def main():
     # Load source data
     print("\n[1/3] Loading source data...")
     
-    common_file = Path("data/outputs/common_factset_trucost_cdp_tickers_extended.csv")
+    common_file = Path("data/outputs/common_companies_by_year_cdp_trucost_factset_lseg_with_trucost_emissions.csv")
     trucost_file = Path("data/raw/Trucost (Access through WRDS)/260710 trucost pulic-ghg-2011to24.csv")
     
     common_df = pd.read_csv(common_file, low_memory=False)
