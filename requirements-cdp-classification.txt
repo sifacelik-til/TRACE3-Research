@@ -1,7 +1,7 @@
 # Install after the project's base requirements.txt.
 # The PyPI 2.14.1 Windows wheel fails to initialize c10.dll on this machine.
 # Install the pinned CPU wheel from PyTorch's official index as documented in
-# CDP_ACTION_TAXONOMY_BENCHMARK.md before installing this file.
+# CDP_CLASSIFICATION.md before installing this file.
 torch==2.6.0
 sentence-transformers==3.4.1
 huggingface-hub>=0.24

@@ -5,7 +5,8 @@ CLI wrapper for target emissions profile report generation.
 import argparse
 from pathlib import Path
 
-from data_engine.report_builder import OUT_DIR, build_target_emissions_profile_report
+
+from dataset_readers.report_builder import OUT_DIR, build_target_emissions_profile_report
 
 
 def main() -> None:

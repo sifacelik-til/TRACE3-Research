@@ -1,4 +1,4 @@
-"""Score two independent coders' review of the CDP clustering sample."""
+"""Score two independent coders' review of the CDP classification sample."""
 
 from __future__ import annotations
 

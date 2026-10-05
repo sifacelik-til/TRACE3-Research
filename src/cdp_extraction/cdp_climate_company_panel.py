@@ -18,10 +18,7 @@ import pandas as pd
 import pyarrow.dataset as ds
 from openpyxl import load_workbook
 
-try:
-    from .cluster_cdp_2016_2024_climate_actions import INPUTS
-except ImportError:
-    from src.cdp_text_clustering.cluster_cdp_2016_2024_climate_actions import INPUTS
+from src.cdp_extraction.extract_cdp_climate_actions_2016_2024 import INPUTS
 
 
 YEARS = tuple(range(2016, 2026))

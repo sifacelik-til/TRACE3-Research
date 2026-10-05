@@ -1,17 +1,4 @@
-"""Extract and cluster CDP 2016–2024 climate initiatives, risks, opportunities.
-
-Run::
-
-    python -m src.cdp_text_clustering.cluster_cdp_2016_2024_climate_actions --stage extract
-    python -m src.cdp_text_clustering.cluster_cdp_2016_2024_climate_actions --stage enrich
-    python -m src.cdp_text_clustering.cluster_cdp_2016_2024_climate_actions --stage baseline
-    python -m src.cdp_text_clustering.cluster_cdp_2016_2024_climate_actions --stage cluster
-
-The first stage needs openpyxl, pandas, pypdf and pyarrow; it does not import
-PyTorch. The optional BERTopic stage uses a local multilingual model. No CDP
-responses are sent to an external service. Raw reported fields, quantitative
-estimates, and conservative text-derived signals have separate columns.
-"""
+"""Extract CDP climate initiatives, risks, and opportunities for 2016--2024."""
 
 from __future__ import annotations
 
@@ -20,24 +7,10 @@ import csv
 import gzip
 import html
 import logging
-import os
 import re
-import sys
-import tempfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-
-# On Windows, c10.dll can fail if numerical libraries initialize first. Keep
-# extraction torch-free, but load torch before NumPy/pandas for clustering.
-if any(arg in {"cluster", "all"} for arg in sys.argv[1:]):
-    numba_cache = Path(tempfile.gettempdir()) / "codex_cdp_numba_cache"
-    numba_cache.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("NUMBA_CACHE_DIR", str(numba_cache))
-    os.environ.setdefault("NUMBA_NUM_THREADS", "4")
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
-    import torch
-    torch.set_num_threads(min(8, torch.get_num_threads()))
 
 import numpy as np
 import pandas as pd
@@ -69,7 +42,6 @@ GUIDES[2024] = {
 INPUT_2024 = ROOT / "data/raw/CDP/2024/full_extract_cm_eds_c_isin_2024_responses_v1_20250623_125717.parquet"
 OUTPUT = ROOT / "data/processed/cdp_2016_2024_climate_actions"
 RECORDS = OUTPUT / "climate_action_risk_opportunity_records.csv.gz"
-MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 MODERN_SHEETS = {"C4.3b": "initiative", "C2.3a": "risk", "C2.4a": "opportunity"}
 LEGACY_SHEETS = {
     "CC3.3b": "initiative",
@@ -359,7 +331,7 @@ def initiative(row: tuple[object, ...], c: dict[str, int], result: dict) -> None
         "timeframe_kind": "",
         "value_chain_position_reported": "",
         "response_strategy_reported": "",
-        "narrative_for_clustering": " ".join(filter(None, [category, initiative_type, comment])),
+        "classification_text": " ".join(filter(None, [category, initiative_type, comment])),
     })
 
 
@@ -402,7 +374,7 @@ def risk_or_opportunity(row: tuple[object, ...], c: dict[str, int], result: dict
         "response_strategy_reported": strategy,
         "likelihood_reported": get(row, c, "Likelihood"),
         "magnitude_reported": get(row, c, "Magnitude of impact"),
-        "narrative_for_clustering": " ".join(filter(None, [driver_group, driver, description, strategy])),
+        "classification_text": " ".join(filter(None, [driver_group, driver, description, strategy])),
     })
 
 
@@ -466,7 +438,7 @@ OUTPUT_FIELDS = [
     "anticipated_financial_effect_long_max_reported",
     "timeframe_reported", "timeframe_kind", "value_chain_position_reported",
     "response_strategy_reported", "likelihood_reported", "magnitude_reported",
-    "narrative_for_clustering", "operational_complexity_signal_inferred",
+    "classification_text", "operational_complexity_signal_inferred",
     "operational_complexity_evidence", "condition_for_success_evidence_inferred",
     "text_signal_method",
 ]
@@ -531,7 +503,7 @@ def risk_or_opportunity_2024(row: tuple[object, ...], c: dict[str, int], result:
         "response_strategy_reported": strategy,
         "likelihood_reported": get(row, c, f"Likelihood of the {kind} having an effect within the anticipated time horizon"),
         "magnitude_reported": get(row, c, "Magnitude"),
-        "narrative_for_clustering": " ".join(filter(None, [driver, description, strategy])),
+        "classification_text": " ".join(filter(None, [driver, description, strategy])),
     })
     # The 2024 questionnaire distinguishes three anticipated horizons. Do not
     # collapse these to a single potential impact figure.
@@ -625,7 +597,7 @@ def extract_2024(writer: csv.DictWriter, audit: list[dict],
                     initiative(row, label_map, entry)
                 else:
                     risk_or_opportunity_2024(row, label_map, entry)
-                if not entry["narrative_for_clustering"].strip():
+                if not entry["classification_text"].strip():
                     continue
                 entry["record_id"] = f"2024:{question}:{source_name}:{account}:{row_order}"
                 write_entry(writer, complete_record(entry))
@@ -673,7 +645,7 @@ def extract(max_rows_per_sheet: int | None = None, output: Path = RECORDS) -> No
                             initiative(row, columns, entry)
                         else:
                             risk_or_opportunity(row, columns, entry)
-                        if not entry["narrative_for_clustering"].strip():
+                        if not entry["classification_text"].strip():
                             continue
                         entry["record_id"] = f"{year}:{sheet}:{excel_row}"
                         write_entry(writer, complete_record(entry))
@@ -716,12 +688,7 @@ def write_coverage_report(input_path: Path = RECORDS) -> None:
 
 
 def enrich_existing_with_currency() -> None:
-    """Add explicit initiative comments and company-year currency without reclustering.
-
-    The current extracted narrative already contains every nonblank initiative
-    comment. Preserve those fitted topic assignments and leave the original
-    processed files untouched; write suffixed enriched copies atomically.
-    """
+    """Add explicit initiative comments and company-year currency to the extract."""
     currencies = load_reporting_currencies()
     if currencies.unavailable_years:
         print(f"Currency sources unavailable: {currencies.unavailable_years}", flush=True)
@@ -731,10 +698,7 @@ def enrich_existing_with_currency() -> None:
         "reporting_currency_source_sheet", "reporting_currency_source_question",
         "reporting_currency_status",
     ]
-    sources = [
-        RECORDS,
-        OUTPUT / "climate_action_risk_opportunity_minilm_hybrid_clusters.csv.gz",
-    ]
+    sources = [RECORDS]
     coverage = defaultdict(Counter)
     for source_path in sources:
         if not source_path.exists():
@@ -748,7 +712,7 @@ def enrich_existing_with_currency() -> None:
             reader = csv.DictReader(source)
             fieldnames = list(reader.fieldnames or [])
             if not {"year", "cdp_account_number", "record_type",
-                    "reported_outcome_text", "narrative_for_clustering"} <= set(fieldnames):
+                    "reported_outcome_text", "classification_text"} <= set(fieldnames):
                 raise ValueError(f"Required columns are missing from {source_path}")
             writer = csv.DictWriter(
                 target,
@@ -759,9 +723,9 @@ def enrich_existing_with_currency() -> None:
                 year = int(row["year"])
                 if row["record_type"] == "initiative":
                     comment = row.get("initiative_comment_reported") or row["reported_outcome_text"]
-                    if comment and comment not in row["narrative_for_clustering"]:
+                    if comment and comment not in row["classification_text"]:
                         raise ValueError(
-                            f"Initiative comment absent from clustering text: {row['record_id']}"
+                            f"Initiative comment absent from classification text: {row['record_id']}"
                         )
                 else:
                     comment = ""
@@ -786,168 +750,18 @@ def enrich_existing_with_currency() -> None:
     summary.to_csv(OUTPUT / "reporting_currency_coverage_by_year.csv", index=False)
     print(summary.to_string(index=False), flush=True)
 
-
-def cluster(input_path: Path = RECORDS, min_topic_size: int = 35, fit_limit: int = 6000) -> None:
-    """Fit separate BERTopic models; transform every eligible record."""
-    print("Loading BERTopic dependencies...", flush=True)
-    import torch  # Load first on Windows, before sentence-transformers/UMAP.
-    from bertopic import BERTopic
-    from hdbscan import HDBSCAN
-    from sentence_transformers import SentenceTransformer
-    from sklearn.feature_extraction.text import CountVectorizer
-    from umap import UMAP
-    from src.cdp_text_clustering.umap_sklearn_compat import patch_topic_model_check_array
-
-    patch_topic_model_check_array()
-
-    del torch  # Import order is intentional.
-    print("Reading extracted records...", flush=True)
-    frame = pd.read_csv(
-        input_path,
-        usecols=["record_id", "record_type", "narrative_for_clustering"],
-        dtype="string", low_memory=False,
-    )
-    assignments: dict[str, tuple[int, str]] = {}
-    print("Loading multilingual embedding model...", flush=True)
-    embedder = SentenceTransformer(MODEL_NAME)
-    embedder.max_seq_length = 256
-    print("Embedding model ready.", flush=True)
-    topic_rows = []
-    for record_type, subset in frame.groupby("record_type", sort=False):
-        eligible = subset["narrative_for_clustering"].fillna("").str.len().ge(35)
-        indices = subset.index[eligible]
-        if len(indices) < max(min_topic_size * 2, 20):
-            print(f"Skipping {record_type}: only {len(indices)} usable narratives")
-            continue
-        documents = frame.loc[indices, "narrative_for_clustering"].astype(str).tolist()
-        print(f"Encoding {record_type}: {len(documents):,} records...", flush=True)
-        embeddings = embedder.encode(documents, batch_size=32, normalize_embeddings=True, show_progress_bar=True)
-        rng = np.random.default_rng(42)
-        fit_indices = np.sort(rng.choice(len(documents), min(fit_limit, len(documents)), replace=False))
-        model = BERTopic(
-            embedding_model=embedder,
-            umap_model=UMAP(n_neighbors=15, n_components=5, min_dist=0, metric="cosine", random_state=42, low_memory=True),
-            hdbscan_model=HDBSCAN(min_cluster_size=min_topic_size, min_samples=10, prediction_data=True),
-            vectorizer_model=CountVectorizer(stop_words="english", ngram_range=(1, 2), min_df=3),
-            calculate_probabilities=False,
-            verbose=False,
-        )
-        print(f"Fitting {record_type} topics on {len(fit_indices):,} records...", flush=True)
-        model.fit_transform([documents[i] for i in fit_indices], embeddings=embeddings[fit_indices])
-        print(f"Assigning {record_type} topics to all records...", flush=True)
-        topics, _ = model.transform(documents, embeddings=embeddings)
-        info = model.get_topic_info()
-        names = info.set_index("Topic")["Name"].to_dict()
-        for record_id, topic in zip(frame.loc[indices, "record_id"].astype(str), topics):
-            assignments[record_id] = (int(topic), names.get(topic, "Outlier / unassigned"))
-        info.insert(0, "record_type", record_type)
-        topic_rows.append(info)
-        model.save(str(OUTPUT / f"bertopic_{record_type}"), serialization="safetensors", save_ctfidf=True, save_embedding_model=MODEL_NAME)
-        print(f"{record_type}: assigned {len(indices):,} records to {sum(info['Topic'].ge(0))} topics", flush=True)
-    destination = OUTPUT / "climate_action_risk_opportunity_clustered.csv.gz"
-    partial = destination.with_name(destination.name + ".partial")
-    with gzip.open(input_path, "rt", encoding="utf-8", newline="") as source, gzip.open(partial, "wt", encoding="utf-8", newline="") as target:
-        reader = csv.DictReader(source)
-        writer = csv.DictWriter(target, fieldnames=list(reader.fieldnames or []) + ["topic_id", "topic_label"])
-        writer.writeheader()
-        for row in reader:
-            topic_id, topic_label = assignments.get(row["record_id"], ("", ""))
-            row.update({"topic_id": topic_id, "topic_label": topic_label})
-            writer.writerow(row)
-    partial.replace(destination)
-    if topic_rows:
-        pd.concat(topic_rows, ignore_index=True).to_csv(OUTPUT / "topic_summary.csv", index=False)
-    print(f"Saved clustered dataset: {destination}")
-
-
-def baseline_cluster(input_path: Path = RECORDS, clusters_per_type: int = 14, fit_limit: int = 30_000) -> None:
-    """Memory-safe, fully local TF-IDF clustering when BERTopic cannot start.
-
-    These are lexical clusters, not BERTopic topics or causal categories.
-    """
-    os.environ.setdefault("LOKY_MAX_CPU_COUNT", "8")
-    from sklearn.cluster import MiniBatchKMeans
-    from sklearn.feature_extraction.text import TfidfVectorizer
-
-    frame = pd.read_csv(
-        input_path,
-        usecols=["record_id", "record_type", "narrative_for_clustering"],
-        dtype="string",
-        low_memory=False,
-    )
-    assignments: dict[str, tuple[str, str]] = {}
-    summaries = []
-    for record_type, subset in frame.groupby("record_type", sort=False):
-        indices = subset.index[subset["narrative_for_clustering"].fillna("").str.len().ge(20)]
-        if len(indices) < clusters_per_type * 3:
-            continue
-        documents = frame.loc[indices, "narrative_for_clustering"].astype(str).tolist()
-        rng = np.random.default_rng(42)
-        fit_positions = np.sort(rng.choice(len(documents), min(fit_limit, len(documents)), replace=False))
-        training = [documents[i] for i in fit_positions]
-        vectorizer = TfidfVectorizer(
-            lowercase=True, strip_accents="unicode", stop_words="english",
-            ngram_range=(1, 2), min_df=5, max_df=0.8,
-            max_features=18000, sublinear_tf=True, dtype=np.float32,
-        )
-        matrix = vectorizer.fit_transform(training)
-        model = MiniBatchKMeans(n_clusters=clusters_per_type, batch_size=1024, n_init=5, random_state=42)
-        model.fit(matrix)
-        terms = np.asarray(vectorizer.get_feature_names_out())
-        labels = {}
-        for topic in range(clusters_per_type):
-            term_ids = np.argsort(model.cluster_centers_[topic])[-5:][::-1]
-            labels[topic] = ", ".join(terms[term_ids])
-        counts = np.zeros(clusters_per_type, dtype=int)
-        record_ids = frame.loc[indices, "record_id"].astype(str).tolist()
-        for start in range(0, len(documents), 2000):
-            batch_labels = model.predict(vectorizer.transform(documents[start:start + 2000]))
-            for record_id, topic in zip(record_ids[start:start + 2000], batch_labels):
-                topic = int(topic)
-                assignments[record_id] = (f"{record_type}_{topic:02d}", labels[topic])
-                counts[topic] += 1
-        for topic in range(clusters_per_type):
-            summaries.append({
-                "record_type": record_type,
-                "cluster_id": f"{record_type}_{topic:02d}",
-                "cluster_label": labels[topic],
-                "records": int(counts[topic]),
-                "method": "TF-IDF + MiniBatchKMeans",
-            })
-        print(f"{record_type}: clustered {len(indices):,} records", flush=True)
-    destination = OUTPUT / "climate_action_risk_opportunity_lexical_clusters.csv.gz"
-    partial = destination.with_name(destination.name + ".partial")
-    with gzip.open(input_path, "rt", encoding="utf-8", newline="") as source, gzip.open(partial, "wt", encoding="utf-8", newline="") as target:
-        reader = csv.DictReader(source)
-        writer = csv.DictWriter(target, fieldnames=list(reader.fieldnames or []) + ["cluster_id", "cluster_label", "cluster_method"])
-        writer.writeheader()
-        for row in reader:
-            cluster_id, cluster_label = assignments.get(row["record_id"], ("", ""))
-            row.update({"cluster_id": cluster_id, "cluster_label": cluster_label, "cluster_method": "TF-IDF + MiniBatchKMeans (lexical baseline)"})
-            writer.writerow(row)
-    partial.replace(destination)
-    pd.DataFrame(summaries).to_csv(OUTPUT / "lexical_cluster_summary.csv", index=False)
-    print(f"Saved lexical-cluster dataset: {destination}", flush=True)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", choices=["extract", "coverage", "baseline", "cluster", "enrich", "all"], default="extract")
-    parser.add_argument("--max-rows-per-sheet", type=int, help="Development smoke test; do not use for production dataset")
-    parser.add_argument("--min-topic-size", type=int, default=35)
-    parser.add_argument("--fit-limit", type=int, default=6000, help="BERTopic training narratives per type (baseline uses at least 30,000); all eligible records receive assignments")
+    parser.add_argument("--stage", choices=("extract", "coverage", "enrich"), default="extract")
+    parser.add_argument("--max-rows-per-sheet", type=int, help="Development smoke-test limit")
     args = parser.parse_args()
     path = RECORDS if args.max_rows_per_sheet is None else OUTPUT / "trial_records.csv.gz"
-    if args.stage in {"extract", "all"}:
+    if args.stage == "extract":
         extract(args.max_rows_per_sheet, path)
-    if args.stage == "coverage":
+    elif args.stage == "coverage":
         write_coverage_report(path)
-    if args.stage == "enrich":
+    else:
         enrich_existing_with_currency()
-    if args.stage == "baseline":
-        baseline_cluster(path, fit_limit=max(args.fit_limit, 30_000))
-    if args.stage in {"cluster", "all"}:
-        cluster(path, args.min_topic_size, args.fit_limit)
 
 
 if __name__ == "__main__":

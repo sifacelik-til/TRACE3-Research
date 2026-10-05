@@ -1,11 +1,11 @@
-"""Encode the reduction-only round-2 records with the existing benchmark models."""
+"""Encode the validated reduction-action records with the local models."""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
-from src.cdp_text_clustering.benchmark_cdp_action_taxonomy import DEFAULT_MODELS, MODEL_SPECS, encode_model, load_analysis_dependencies, read_jsonl
+from src.cdp_classification.embeddings import DEFAULT_MODELS, MODEL_SPECS, encode_model, read_jsonl
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,7 +21,6 @@ def main() -> None:
     parser.add_argument("--offline", action="store_true")
     args = parser.parse_args()
     records = read_jsonl(args.output / "span_records.jsonl.gz")
-    load_analysis_dependencies()
     for model in args.models:
         encode_model(model, records, args.output, batch_size=args.batch_size, device=args.device, offline=args.offline)
 

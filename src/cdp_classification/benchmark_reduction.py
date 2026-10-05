@@ -17,7 +17,7 @@ from sklearn.model_selection import GroupKFold
 from sklearn.preprocessing import normalize
 from sklearn.svm import LinearSVC
 
-from src.cdp_text_clustering.benchmark_cdp_action_taxonomy import read_jsonl
+from src.cdp_classification.embeddings import file_digest, read_jsonl
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -135,6 +135,7 @@ def main() -> None:
     parser.add_argument("--workbook", type=Path, default=WORKBOOK)
     parser.add_argument("--output", type=Path, default=OUTPUT)
     parser.add_argument("--folds", type=int, default=5)
+    parser.add_argument("--models", nargs="+", choices=MODELS, default=MODELS)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
 
@@ -151,7 +152,19 @@ def main() -> None:
         ("TF-IDF SVM", None, 0.0, None, 1.0),
         ("TF-IDF SVM balanced", None, 0.0, "balanced", 1.0),
     ]
-    for model in MODELS:
+    records_hash = file_digest(args.input / "span_records.jsonl.gz")
+    for model in args.models:
+        manifest_path = args.input / "encoders" / model / "manifest.json"
+        if not manifest_path.exists():
+            raise FileNotFoundError(
+                f"Missing {manifest_path}. Run encode-reduction before benchmarking."
+            )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("sample_sha256") != records_hash:
+            raise ValueError(
+                f"The {model} embeddings were created for a different sample. "
+                "Run encode-reduction again."
+            )
         semantic = np.load(args.input / "encoders" / model / "embeddings.npy", allow_pickle=False)
         configurations.extend([
             (f"{DISPLAY[model]} hybrid", semantic, 1.0, None, 1.0),
