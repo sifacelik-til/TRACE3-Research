@@ -59,6 +59,8 @@ ipython_config.py
 # Environments
 .env
 .venv
+.venv-*/
+.artifact-runtime/
 env/
 venv/
 ENV/
@@ -83,4 +85,14 @@ data/processed/*
 !data/processed/.gitkeep
 data/outputs/*
 !data/outputs/.gitkeep
+!data/outputs/README.md
+data/models/
+/outputs/
+tmp/
+temp/
+reports/**/*.csv
+reports/**/*.html
+reports/**/*.docx
+*.pbix
+~$*
 *.log

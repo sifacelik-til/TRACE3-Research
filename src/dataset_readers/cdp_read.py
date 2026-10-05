@@ -16,13 +16,13 @@ from openpyxl import load_workbook
 try:
     from .cdp_theme_taxonomy import THEME_PATTERNS, QUESTION_CODE_THEMES
 except ImportError:
-    from cdp_theme_taxonomy import THEME_PATTERNS, QUESTION_CODE_THEMES
+    from src.dataset_readers.cdp_theme_taxonomy import THEME_PATTERNS, QUESTION_CODE_THEMES
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_CDP_ROOT = Path(r"../../data/raw/CDP")
-DEFAULT_OUT_DIR = Path(r"../../data/outputs")
+DEFAULT_OUT_DIR = Path(__file__).resolve().parents[2] / "data" / "outputs" / "cdp_extraction"
 FACTSET_ENTITY_PATH = Path(
     __file__).resolve().parent.parent / "data" / "raw" / "FactSet" / "sym_entity_v1_full_12328" / "sym_entity.txt"
 QUESTION_CODE_RE = re.compile(r"^(CC?\d+(?:\.\d+)*[a-z]?)", re.IGNORECASE)

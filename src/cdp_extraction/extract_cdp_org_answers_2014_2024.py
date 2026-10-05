@@ -24,7 +24,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 DEFAULT_CDP_ROOT = Path(r"data\raw\CDP")
-DEFAULT_OUT_DIR = Path(r"data\outputs")
+DEFAULT_OUT_DIR = Path(r"data\outputs\cdp_extraction")
 FACTSET_ENTITY_PATH = Path(__file__).resolve().parent.parent / "data" / "raw" / "FactSet" / "sym_entity_v1_full_12328" / "sym_entity.txt"
 QUESTION_CODE_RE = re.compile(r"^(CC?\d+(?:\.\d+)*[a-z]?)", re.IGNORECASE)
 LEGACY_COL_CODE_RE = re.compile(r"^(CC?\d+(?:\.\d+)*[a-z]?)_C\d+_", re.IGNORECASE)
@@ -33,12 +33,12 @@ try:
     from .cdp_theme_taxonomy import THEME_PATTERNS, QUESTION_CODE_THEMES
 except ImportError:
     try:
-        from data_engine.cdp_theme_taxonomy import (
+        from src.dataset_readers.cdp_theme_taxonomy import (
             THEME_PATTERNS,
             QUESTION_CODE_THEMES,
         )
     except ModuleNotFoundError:
-        from cdp_theme_taxonomy import THEME_PATTERNS, QUESTION_CODE_THEMES
+        from src.dataset_readers.cdp_theme_taxonomy import THEME_PATTERNS, QUESTION_CODE_THEMES
 
 
 def normalize_text(value: object) -> str:

@@ -93,7 +93,7 @@ def main():
     print("\n[1/4] Loading source data...")
     
     factset_file = Path("data/processed/targets_suppliers_factset.csv")
-    common_file = Path("data/outputs/common_companies_by_year_cdp_trucost_factset_lseg_with_trucost_emissions.csv")
+    common_file = Path("data/outputs/dataset_readers/common_companies_by_year_cdp_trucost_factset_lseg_with_trucost_emissions.csv")
     trucost_file = Path("data/raw/Trucost (Access through WRDS)/260710 trucost pulic-ghg-2011to24.csv")
     
     factset_df = pd.read_csv(factset_file)

@@ -20,7 +20,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
-try:  # Package execution: python -m data_engine.cdp_reader
+try:  # The organization-answer extractor is in a separate package.
     from .extract_cdp_org_answers_2014_2024 import (
         DEFAULT_CDP_ROOT,
         extract_from_2024_parquet,
@@ -28,8 +28,8 @@ try:  # Package execution: python -m data_engine.cdp_reader
         parse_year_file,
         resolve_org_name_from_factset_id,
     )
-except ImportError:  # Direct execution: python src/data_engine/cdp_reader.py
-    from extract_cdp_org_answers_2014_2024 import (
+except ImportError:
+    from src.cdp_extraction.extract_cdp_org_answers_2014_2024 import (
         DEFAULT_CDP_ROOT,
         extract_from_2024_parquet,
         extract_from_legacy_xlsx,
@@ -40,7 +40,7 @@ except ImportError:  # Direct execution: python src/data_engine/cdp_reader.py
 try:
     from .cdp_theme_taxonomy import THEME_PATTERNS
 except ImportError:
-    from cdp_theme_taxonomy import THEME_PATTERNS
+    from src.dataset_readers.cdp_theme_taxonomy import THEME_PATTERNS
 
 
 LOGGER = logging.getLogger(__name__)

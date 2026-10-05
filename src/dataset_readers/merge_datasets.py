@@ -9,7 +9,7 @@ import pandas as pd
 from openpyxl import load_workbook
 from rapidfuzz import fuzz, process
 
-from data_engine.extract_cdp_org_answers_2014_2024 import (
+from src.cdp_extraction.extract_cdp_org_answers_2014_2024 import (
     DEFAULT_CDP_ROOT,
     find_header_row,
     get_col_idx,
@@ -562,7 +562,7 @@ def main() -> None:
 
     input_path = args.input
     if not input_path.exists():
-        alt = Path(r"C:\Users\scelik\Desktop\TRACE3Code\data\outputs\common_factset_trucost_cdp_tickers_extended.csv")
+        alt = Path(r"C:\Users\scelik\Desktop\TRACE3Code\data\outputs\dataset_readers\common_factset_trucost_cdp_tickers_extended.csv")
         if alt.exists():
             input_path = alt
         else:

@@ -37,7 +37,7 @@ Run:
     python missing_by_year.py
     python missing_by_year.py --start-year 2015 --end-year 2024
 
-Outputs (in ../reports/missing_analysis/):
+Outputs (in ../reports/dataset_readers/missing_analysis/):
     lseg_missing_by_year_wide.csv        lseg_missing_by_year_long.csv
     lseg_policies_missing_long.csv       lseg_field_summary.csv
     lseg_missing_yoy_delta.csv
@@ -76,7 +76,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TRUCOST_RAW_PATH = (PROJECT_ROOT / "data" / "raw" / "Trucost (Access through WRDS)"
                     / "260710 trucost pulic-ghg-2011to24.csv")
 LSEG_RAW_PATH = PROJECT_ROOT / "data" / "raw" / "LSEG" / "lseg_full_universe.csv"
-OUTPUT_DIR = PROJECT_ROOT / "reports" / "missing_analysis"
+OUTPUT_DIR = PROJECT_ROOT / "reports" / "dataset_readers" / "missing_analysis"
 
 YEAR_RANGE = (2014, 2025)          # e.g. (2011, 2024); None = no filter
 

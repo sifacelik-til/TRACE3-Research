@@ -1,0 +1,178 @@
+\documentclass[12pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,booktabs,hyperref,setspace,graphicx}
+\doublespacing
+\title{Identifying Operational Climate Responses in Corporate Disclosures: A Sector-Specific Text-Encoder Benchmark}
+\author{}
+\date{}
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We compare four multilingual text encoders for organising corporate disclosures on emissions reduction, climate risks, opportunities and value-chain engagement. The corpus contains 329,994 eligible answer fields from 2020--2025. A matched benchmark of 768 fields separates linked companies across training, model selection and verification. Responses are divided into nonoverlapping text segments and aggregated into field-level representations, which combine semantic embeddings with word-frequency features for sector-specific clustering. Qwen3 achieves the highest selection score among complete-text encoders, but verification does not establish superiority over all alternatives. Truncated-prefix representations score higher than complete-text aggregation for every encoder, indicating that retaining all source text does not necessarily improve cluster separation. The benchmark supports a provisional encoder choice; full-corpus categorisation and human validation remain incomplete.
+\end{abstract}
+\noindent\textbf{Keywords:} sustainable operations; supply chains; climate disclosures; text analysis; clustering.
+
+\section{Research Objective and Unit of Analysis}
+Corporate climate responses include changes to equipment, energy sourcing, logistics, supplier relationships and resilience investments. We organise these disclosures into candidate categories for operations models. Emissions-reduction and engagement narratives can inform action definitions, while risk and opportunity narratives describe conditions affecting those actions.
+
+The unit of analysis is an extracted answer field: the text stored in a particular questionnaire field for a response record. A company can contribute multiple fields, and a field can describe several mechanisms. Clusters group similar disclosures; they do not measure realised abatement, action feasibility or causal effects. Reported savings and targets may describe expected rather than realised changes.
+
+\section{Data and Sample Construction}
+The source datasets cover targets and performance, risks and opportunities, and engagement. We retain disclosure years 2020--2025, which need not coincide with financial or emissions reporting years. Of 606,014 source rows, 329,994 answer fields are eligible and nonblank, representing 248,101 distinct exact texts (Table~\ref{tab:field_counts}). Rows concerning verification, carbon pricing, assessment processes, numerical-only answers and unrelated questions are outside the specified narrative scope. Records with an unspecified environmental focus remain flagged rather than classified as climate-specific.
+
+\begin{table}[htbp]
+\centering
+\caption{Eligible Answer Fields by Disclosure Year}
+\label{tab:field_counts}
+\begin{tabular}{@{}lr@{}}
+\toprule
+Disclosure year & Eligible fields \\
+\midrule
+2020 & 39,028 \\
+2021 & 45,541 \\
+2022 & 59,707 \\
+2023 & 69,103 \\
+2024 & 60,013 \\
+2025 & 56,602 \\
+\midrule
+Total & 329,994 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We preserve field boundaries: risk and opportunity descriptions remain separate from response strategies; target plans remain separate from initiative explanations; and engagement details remain separate from effects, coverage rationales and compliance explanations. Legacy fields combining responses and costs are retained as combined fields. Source locations and text offsets refer to the extracted values, including stored multi-select answers, rather than reconstructed spreadsheet cells or translations.
+
+\subsection{Company Separation and Matched Sampling}
+To limit information leakage, we link CDP accounts that share a FactSet entity, Trucost company or LSEG International Securities Identification Number (ISIN). A connected component contains all accounts linked directly or indirectly through these identifiers. A fixed hash assigns each component to training, selection or verification with probabilities 0.6, 0.2 and 0.2. All years of a component remain in one pool. These probabilities do not imply identical proportions of answer fields.
+
+Evaluation sampling excludes texts matching training texts after case and whitespace normalisation; verification also excludes matches to selection texts. This removes exact normalised duplicates, but not paraphrases or other near-duplicates. Training fits clusters, selection chooses the encoder, and verification evaluates that fixed choice on different linked-company groups.
+
+The benchmark covers four disclosure goals---reduction, risk, opportunity and engagement---with two primary fields per goal. For each field, we select two reported industries with sufficient observations. The resulting 16 cohorts, each defined by industry, goal and source field, contain 32 training, eight selection and eight verification fields, for 768 fields overall. Sampling cycles across available years; questionnaire changes prevent every field from appearing in every year. This design evaluates transfer across companies, not forecasts for future years. Its findings need not extend to rare industries, supplemental fields or individual languages.
+
+\section{Text Representation and Clustering}
+\subsection{Complete-Text Encoding}
+An encoder maps text to an embedding, a numerical vector whose geometry represents semantic similarity. We compare multilingual MiniLM-L12-v2, multilingual E5-base, BGE-M3 and Qwen3-Embedding-0.6B using fixed local model revisions and 32-bit CPU inference. E5 receives its query prefix; Qwen3 receives a fixed clustering instruction. Each comparison therefore evaluates an encoder together with its prompt. No answer text is transmitted to an external service.
+
+All encoders use a common limit of 128 input tokens, including prompts and special tokens. Tokens are the text units produced by each model's tokenizer and need not correspond to whole words. This common limit controls the comparison but does not test the larger models' maximum context lengths.
+
+Each field is divided into nonoverlapping chunks that preserve all original characters. Sentence boundaries are preferred; oversized sentences are divided at tokenizer-checked whitespace or character boundaries. Stored offsets identify each segment using zero-based Unicode character positions and an exclusive end. For field $i$, let $z_{ij}$ be the unit-length embedding of chunk $j$ and $w_{ij}>0$ its content-token count. The field embedding is
+\begin{equation}
+x_i=\frac{\sum_j w_{ij}z_{ij}}{\left\|\sum_j w_{ij}z_{ij}\right\|_2}.
+\label{eq:field_embedding}
+\end{equation}
+Thus longer chunks receive greater weight, and the aggregate is normalised to unit Euclidean length. Preserving source characters does not imply preserving all meaning in this aggregate: chunk boundaries affect tokenization, and averaging can merge distinct mechanisms. Chunks are not treated as independent observations. A matched comparison uses only the initial text fitting within the same token budget, holding the encoder, prompt, sample and clustering procedure fixed.
+
+\subsection{Sector-Specific Clustering}
+CDP primary industry defines the broad sector; detailed sector classifications remain metadata. Missing or unrecognised industries are not assigned pooled fallback clusters. Within each cohort, we combine the semantic embedding with term frequency--inverse document frequency (TF--IDF), which weights words and adjacent word pairs by their frequency within a field and rarity across training fields. Let $t_i$ denote the normalised TF--IDF vector fitted using training data. The hybrid representation is
+\begin{equation}
+h_i=\operatorname{normalize}\left[\sqrt{0.7}\,x_i;\sqrt{0.3}\,t_i\right],
+\label{eq:hybrid_embedding}
+\end{equation}
+where brackets denote concatenation and normalisation scales the vector to unit length. The weights allocate 70\% to semantic and 30\% to lexical similarity.
+
+We fit $k$-means, which groups observations around cluster centroids, for $k=2,\ldots,16$, subject to sample size. Normalised duplicate training texts contribute one fitting observation. Each candidate uses seeds 42, 123 and 2026, with ten initialisations per seed. An admissible partition must contain at least three unique training fields and two companies per cluster under every seed. We select the largest admissible $k$ whose mean training cosine silhouette is positive and within 0.02 of the best score. Unsupported cohorts remain unclustered. Cluster names use distinctive training terms.
+
+\subsection{Selection and Verification}
+The silhouette compares an observation's average distance within its assigned cluster with its average distance to the nearest alternative cluster \cite{silhouette}. It ranges from $-1$ to $1$: larger values indicate better separation, values near zero indicate overlap, and negative values indicate closer proximity to another cluster. We use cosine distance, which compares vector directions.
+
+Each partition is evaluated in five common reference spaces: the four complete-text encoder spaces and training-fitted TF--IDF. A cohort score averages these five silhouettes. Unsupported partitions or undefined scores receive a penalty of $-1$. We average cohort scores within each goal and then give the four goals equal weight. This macro score combines separation with the ability to produce evaluable partitions; it is not classification accuracy. Common reference spaces reduce dependence on a single encoder's geometry, although they are not external ground truth and TF--IDF also enters the clustering features.
+
+The encoder with the highest selection score is fixed before verification. We compare its verification score with each rival using 2,000 paired bootstrap resamples of cohorts, stratified by goal. Adjusted tail probabilities account for three comparisons. Because cohorts can share companies, the resulting intervals describe sensitivity to cohort resampling rather than provide conventional independent-sample confidence intervals. Verification does not trigger reselection.
+
+\section{Benchmark Results}
+\subsection{Encoder Choice and Variation Across Cohorts}
+Qwen3 has the highest complete-text selection score ($-0.1687$) and verification score (0.0073), as shown in Table~\ref{tab:encoder_scores} and Figure~\ref{fig:encoder_selection_verification}. Its verification advantage is 0.4856 over BGE-M3, 0.3283 over E5-base and 0.2860 over MiniLM. The descriptive interval includes zero for E5-base (Table~\ref{tab:verification_comparisons}), so verification does not establish superiority over all alternatives. Qwen3 is retained as the provisional choice under the selection rule.
+
+\begin{table}[htbp]
+\centering
+\caption{Complete-Text Encoder Scores and Observed Computation Time}
+\label{tab:encoder_scores}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Encoder & Seconds & Selection & Verification \\
+\midrule
+MiniLM & 156.9 & -0.3449 & -0.2787 \\
+E5-base & 442.0 & -0.5193 & -0.3209 \\
+BGE-M3 & 1295.9 & -0.2484 & -0.4782 \\
+Qwen3-0.6B & 1774.6 & -0.1687 & 0.0073 \\
+\bottomrule
+\end{tabular}
+\par\smallskip
+\begin{minipage}{\linewidth}\footnotesize
+\textit{Notes.} Scores average across goals and include $-1$ penalties. Computation time covers checkpointed chunk and prefix encoding of the benchmark fields, not complete-text encoding alone.
+\end{minipage}
+\end{table}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.94\textwidth]{../../data/outputs/cdp_text_clustering/cdp_sections_benchmark_2020_2025/figures/encoder_selection_verification.pdf}
+\caption{Encoder Scores in the Selection and Verification Samples}
+\label{fig:encoder_selection_verification}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{Qwen3 Verification-Score Differences}
+\label{tab:verification_comparisons}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+Comparator & Difference & Descriptive interval \\
+\midrule
+BGE-M3 & 0.4856 & [0.2252, 0.7385] \\
+E5-base & 0.3283 & [-0.0195, 0.6615] \\
+MiniLM & 0.2860 & [0.0047, 0.5985] \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:encoder_cohort_scores} shows that performance varies substantially by sector and field. Risk-description cohorts generally yield defined scores, whereas opportunity fields and Services target-plan progress frequently receive penalties. Most defined scores are modest. The aggregate ranking therefore reflects both cluster separation and the frequency of evaluable partitions, rather than uniformly strong performance across disclosure types. With only eight fields per cohort in each evaluation pool, unsupported scores may also reflect limited evaluation samples.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.94\textwidth]{../../data/outputs/cdp_text_clustering/cdp_sections_benchmark_2020_2025/figures/encoder_cohort_scores.pdf}
+\caption{Scores by Sector and Source Field. Circles denote selection and squares verification. Points at $-1$ mark unsupported or undefined partitions.}
+\label{fig:encoder_cohort_scores}
+\end{figure}
+
+\subsection{Text Coverage and Computational Cost}
+Truncated-prefix encoding scores higher than complete-text aggregation for every encoder in both samples (Figure~\ref{fig:encoder_complete_vs_prefix}). In verification, Qwen3's score increases from 0.0073 to 0.0670 and its defined cohorts increase from 15 to 16. The other encoders also produce more defined verification cohorts with prefixes. Complete-text aggregation therefore has no demonstrated clustering advantage under this protocol. Its rationale is source coverage: later passages may contain mechanisms or supporting evidence omitted by truncation. Whether retaining these passages improves substantive coding requires human validation.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.94\textwidth]{../../data/outputs/cdp_text_clustering/cdp_sections_benchmark_2020_2025/figures/encoder_complete_vs_prefix.pdf}
+\caption{Complete-Text and Truncated-Prefix Scores on Matched Fields. Labels report defined cohorts out of 16; scores include penalties.}
+\label{fig:encoder_complete_vs_prefix}
+\end{figure}
+
+Figure~\ref{fig:encoder_runtime_and_truncation} shows the computational trade-off. Encoding takes approximately 2.6 minutes for MiniLM, 7.4 for E5-base, 21.6 for BGE-M3 and 29.6 for Qwen3 under the recorded CPU configuration. Approximately 45--47\% of fields exceed the common token limit, making truncation relevant to nearly half the sample. These times include both chunk and prefix computation and do not isolate the additional cost of full-text processing. Qwen3's higher complete-text score comes with substantially greater computation than MiniLM.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.94\textwidth]{../../data/outputs/cdp_text_clustering/cdp_sections_benchmark_2020_2025/figures/encoder_runtime_and_truncation.pdf}
+\caption{Observed CPU Encoding Time and Exposure to Prefix Truncation. Runtime includes chunk and prefix computation on 768 fields.}
+\label{fig:encoder_runtime_and_truncation}
+\end{figure}
+
+\section{Full-Corpus Categorisation and Validation}
+Full-corpus processing remains incomplete. At the checkpoint documented in the supplied draft, 6,400 of 329,994 fields had been encoded; this is a progress count rather than a categorisation result. The deployment procedure uses the selected encoder for every eligible field, reusing cached embeddings for exact duplicate texts. Cluster fitting uses at most 256 year-balanced unique training fields per cohort; remaining fields are assigned from their embeddings without a lexical surrogate. Deployment also covers less frequent sectors and supplemental fields outside the matched benchmark.
+
+A separate codebook defines reduction, engagement, physical adaptation, business continuity and risk-transfer mechanisms. Unlike unsupervised clusters, these codes are predefined categories. Multi-label coding allows a field to receive more than one code. The procedure compares code definitions with chunk embeddings, proposes at most two mechanisms per chunk, and abstains when information is insufficient. Each suggestion retains its source span and similarity score; similarities are not probabilities. Whole-chunk evidence may require narrowing during review, and automated suggestions remain distinct from human-accepted labels.
+
+Before using these measures in operations models, independent coders will assess a blinded sample, identify supporting spans and adjudicate disagreements. Validation will report precision, the proportion of proposed labels judged correct; recall, the proportion of relevant labels recovered; and inter-rater agreement. Sensitivity analyses will address questionnaire changes, language, sector coverage, temporal variation, linked-company dependence and records with unspecified environmental scope. This validation is necessary before interpreting cluster or code frequencies as economically meaningful action prevalence.
+
+\section{Reproducibility}
+Local records preserve source hashes and coordinates, company links, split and sample identities, model revisions, chunk boundaries, fitting observations, candidate scores and completion status. Model weights are fixed by revision. The code and licensed datasets have not been made public; the data-access statement remains subject to licensing review.
+
+\appendix
+\section{Computational Procedure}
+From the repository root, the configured encoder environment runs
+\begin{verbatim}
+python -m src.cdp_text_clustering.benchmark_cdp_sections --stage all
+\end{verbatim}
+Individual stages are \texttt{prepare}, \texttt{encode}, \texttt{evaluate}, \texttt{deploy} and \texttt{report}. Outputs are stored in \path{data/outputs/cdp_text_clustering/cdp_sections_benchmark_2020_2025}; completion markers are written only after a stage succeeds.
+
+\begin{thebibliography}{9}
+\bibitem{silhouette} Rousseeuw, P. J. 1987. Silhouettes: A graphical aid to the interpretation and validation of cluster analysis. \emph{Journal of Computational and Applied Mathematics} 20, 53--65.
+\end{thebibliography}
+\end{document}

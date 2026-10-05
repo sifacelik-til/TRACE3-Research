@@ -1,0 +1,213 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=0.82in]{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{microtype}
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue,citecolor=black}
+
+\title{Choosing a Topic Model for CDP Climate Disclosures, 2016--2024}
+\author{}
+\date{29 September 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note compares three unsupervised approaches to classifying CDP narratives
+about emissions-reduction initiatives, climate risks, and climate opportunities:
+TF--IDF with nonnegative matrix factorization (NMF), multilingual MiniLM
+embeddings with $k$-means, and BERTopic. All methods are tested on the same
+year-balanced sample; both neural approaches use the same 256-token embeddings.
+The recommended main specification is MiniLM with 12 clusters per response
+type, with NMF as a lexical sensitivity check. BERTopic runs successfully, but
+its substantial outlier fraction makes it less suitable for complete
+company-year coverage in this dataset.
+\end{abstract}
+
+\section{Research setting and methodological rationale}
+The extracted CDP corpus contains 314,298 public response rows from the
+questionnaire items on implemented reduction initiatives, climate risks, and
+opportunities across 2016--2024. The questionnaire identifiers and answer
+formats change across years, so clustering each response type separately is
+more defensible than pooling all three. Topic assignments are descriptions of
+disclosures, not measurements of actual abatement or causal policy effects.
+For initiatives, the clustering text combines the reported category, type,
+and the free-text Comment. The Comment was present in the text used for
+the fitted models; the enriched output now also exposes it in a separate
+column. A company-year reporting-currency selection has been joined from
+CC0.4/C0.4 or, in 2024, Q1.2. It is available for 314,215 of the
+314,298 source rows, but was not used as a topic-model feature and does
+not convert monetary amounts into a common currency.
+
+Sentence-BERT-style encoders produce fixed-length vectors suited to semantic
+comparison of texts \cite{reimers2019}. BERTopic combines transformer
+embeddings, dimensionality reduction, density clustering, and class-based
+TF--IDF topic words \cite{grootendorst2022}. Studies of short survey
+narratives find neural approaches useful, but also show that word-coherence
+scores can disagree with expert judgments \cite{xu2022,hoyle2021}. We
+therefore compare coverage and semantic separation as well as word-level
+interpretability, and retain representative responses for human review.
+
+\section{Common sample and evaluation}
+For each response type and disclosure year, we draw 200 distinct narratives
+of at least 35 characters after removing exact duplicate texts within type.
+The resulting sample has 5,400 records: 1,800 per type, with 1,440 training
+and 360 held-out records per type. The random seed is 42. The
+\href{https://huggingface.co/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}{multilingual
+MiniLM-L12-v2} encoder produces normalized 384-dimensional embeddings.
+We explicitly set \texttt{max\_seq\_length = 256}; the distributed sentence
+transformer defaults to 128 tokens, although its underlying BERT model has
+512 position embeddings. Thus the 256-token setting is technically supported
+but is an override of the model's distributed pooling configuration, not a
+separately validated long-document model.
+
+NMF uses 12 components on word-level TF--IDF. MiniLM with $k$-means uses 12
+clusters and class-level TF--IDF words to describe each cluster. BERTopic
+uses the same precomputed MiniLM embeddings, a five-dimensional cosine UMAP
+projection, and HDBSCAN with a minimum cluster size of 25 and
+\texttt{min\_samples = 1}. BERTopic chooses its own number of topics and may
+label responses as outliers. All three methods use the same training/test
+split. BERTopic was fitted, used to transform held-out narratives, and saved;
+the comparison is not based on an import-only smoke test.
+For the exclusive assignment diagnostics, an NMF response is assigned to its
+highest-weight component, even though NMF itself permits topic mixtures.
+
+We report cosine silhouette on held-out embeddings (higher means more
+separation), mean pairwise normalized pointwise mutual information (NPMI) for
+the ten leading words per topic (higher means more within-topic word
+co-occurrence), and top-ten word diversity (the fraction of distinct words
+across topics). NPMI uses the common sampled corpus as its reference, with
+zero-co-occurrence pairs set to $-1$. For BERTopic, silhouette is calculated
+\emph{only among assigned responses}; this conditional score cannot be read
+without its outlier rate. None of these diagnostics supplies ground-truth
+topic labels \cite{hoyle2021,hoyle2022}. Silhouette in MiniLM space also
+structurally favors the two models that cluster MiniLM embeddings; we
+therefore include a parallel TF--IDF-space silhouette check below.
+
+\section{Benchmark results}
+\begin{table}[htbp]
+\centering
+\caption{Held-out topic-model diagnostics by CDP response type}
+\label{tab:models}
+\small
+\setlength{\tabcolsep}{4.0pt}
+\begin{tabular}{llrrrrrr}
+\toprule
+Type & Method & Topics & Outliers (\%) & Sem.\ sil. & Lex.\ sil. & NPMI & Diversity \\
+\midrule
+Initiatives & TF--IDF + NMF       & 12 & 0.0  &  0.041 & 0.054 & 0.188 & 0.700 \\
+            & MiniLM + $k$-means & 12 & 0.0  &  0.124 & 0.048 & 0.220 & 0.608 \\
+            & BERTopic           & 18 & 28.3 &  0.134 & 0.067 & 0.096 & 0.667 \\
+\addlinespace
+Risks       & TF--IDF + NMF       & 12 & 0.0  & -0.020 & 0.032 & 0.296 & 0.792 \\
+            & MiniLM + $k$-means & 12 & 0.0  &  0.057 & 0.007 & 0.269 & 0.500 \\
+            & BERTopic           & 13 & 26.4 &  0.071 & 0.013 & 0.225 & 0.638 \\
+\addlinespace
+Opportunities & TF--IDF + NMF       & 12 & 0.0  & 0.016 & 0.020 & 0.162 & 0.792 \\
+              & MiniLM + $k$-means & 12 & 0.0  & 0.063 & 0.006 & 0.179 & 0.458 \\
+              & BERTopic           & 18 & 58.1 & 0.058 & 0.002 & 0.118 & 0.544 \\
+\bottomrule
+\end{tabular}
+
+\vspace{3pt}
+\begin{minipage}{0.98\linewidth}\footnotesize
+\emph{Notes.} Each type has 1,440 training and 360 held-out narratives.
+\emph{Sem.} and \emph{Lex.} are cosine silhouette in the common MiniLM and
+TF--IDF spaces, respectively. NPMI and word diversity describe topic words,
+not assignment accuracy. Both BERTopic silhouettes exclude held-out outliers;
+NMF and $k$-means assign all held-out responses.
+\end{minipage}
+\end{table}
+
+MiniLM with $k$-means has higher held-out semantic separation than NMF for
+all three response types and higher NPMI for initiatives and opportunities.
+NMF has higher lexical silhouette for all three types, yields more distinct
+top words, and has the highest risk-word coherence. These diagnostics expose
+an evaluation-space trade-off, not a decisive ordering of topic validity.
+BERTopic's conditional silhouette is sometimes high, but 28.3\% of
+initiatives, 26.4\% of risks, and 58.1\% of opportunities are unassigned.
+Across alternative HDBSCAN settings, a more conservative specification
+(minimum cluster size 25, \texttt{min\_samples = 5}) collapses risks into
+two topics, while a smaller cluster size (10, \texttt{min\_samples = 2})
+creates 30--42 topics per type and leaves roughly 40--64\% unassigned.
+The selected BERTopic setting in Table~\ref{tab:models} is the most usable
+of these three tested variants, but its coverage remains weak.
+On this machine, NMF fitting took 0.2--0.7 seconds per type, $k$-means
+0.4--0.5 seconds, and BERTopic 3.2--12.9 seconds. These times exclude the
+shared 303.6-second MiniLM embedding pass and are hardware-dependent.
+
+The inspected leading terms are substantively recognizable: initiative
+clusters include lighting, HVAC, solar power, waste and materials, and fleet
+changes; risk clusters include carbon pricing, weather events, materials
+costs, and reputation. Opportunity labels overlap more, particularly around
+new products and services. These are observations about a sampled vocabulary,
+not a completed expert coding exercise. CDP's selected answer categories are
+included in the clustering narrative, so some topics may reproduce the
+questionnaire's taxonomy rather than discover entirely new themes.
+
+\section{Recommendation for the decarbonization panel}
+Use 12-type-specific MiniLM/$k$-means clusters as the main descriptive theme
+variables. They cover all tested responses and avoid BERTopic's variable
+outlier selection, which would otherwise make year-to-year company panels
+harder to compare. Retain TF--IDF/NMF as a lexical robustness analysis,
+especially for risks, and use BERTopic for exploratory discovery among its
+well-supported non-outlier groups, not as the sole assignment system.
+This is a recommendation for \emph{topic organization}, not a claim that
+MiniLM has established causal effects on emissions.
+
+For the full corpus, a computationally cheaper implementation embeds a
+year-balanced training sample with MiniLM, fits semantic clusters, and uses
+a separately validated TF--IDF classifier to assign the remaining texts.
+Those inferred labels must be marked separately from direct embedding labels;
+agreement with a held-out MiniLM assignment is a surrogate-fidelity measure,
+not evidence of substantive topic validity. Before using cluster prevalence
+as a regressor, manually code a stratified sample of response texts from
+each topic and year, record inter-rater agreement, and audit the unmatched
+or ambiguous narratives. Aggregate labels to the company-year level only
+after that check. Reported initiative savings must remain distinct from
+observed Scope 1--3 emissions changes.
+
+The 256-token full-corpus hybrid run produced assignments for 312,907 of
+314,298 records. Of these, 18,000 were directly embedded and 294,907 were
+assigned by the TF--IDF surrogate; 1,391 very short narratives were left
+unassigned. On exact-text-grouped holdouts, surrogate accuracy/macro-F1 were
+0.772/0.752 for initiatives, 0.687/0.624 for risks, and 0.668/0.671 for
+opportunities. The weaker risk and opportunity fidelity warrants additional
+manual review and caution in any downstream regression using those labels.
+Neither this fidelity test nor the unsupervised benchmark establishes
+year-to-year measurement invariance. The full-corpus implementation uses
+MiniBatchKMeans and surrogate assignment, so it is a scalable approximation
+to, not the identical fitted model from, the common-sample benchmark.
+The benchmark manifest, metric table, topic words, representative narratives,
+and fitted BERTopic models are saved with the analysis output. Computation
+used locally cached model weights without transmitting CDP text to an
+external language-model service.
+
+\begin{thebibliography}{9}
+\bibitem{reimers2019} Reimers, N. and Gurevych, I. (2019).
+Sentence-BERT: Sentence embeddings using Siamese BERT-networks.
+\emph{Proceedings of EMNLP-IJCNLP}.
+\url{https://aclanthology.org/D19-1410/}.
+
+\bibitem{grootendorst2022} Grootendorst, M. (2022).
+BERTopic: Neural topic modeling with a class-based TF-IDF procedure.
+\emph{arXiv:2203.05794}.
+\url{https://arxiv.org/abs/2203.05794}.
+
+\bibitem{xu2022} Xu, X., Stulp, G., Van Den Bosch, A., and Gauthier, A. (2022).
+Understanding narratives from demographic survey data: A comparative study
+with multiple neural topic models. \emph{Proceedings of NLP+CSS}, 33--38.
+\url{https://aclanthology.org/2022.nlpcss-1.4/}.
+
+\bibitem{hoyle2021} Hoyle, A., Goel, P., Hian-Cheong, A., Peskov, D.,
+Boyd-Graber, J., and Resnik, P. (2021).
+Is automated topic model evaluation broken? The incoherence of coherence.
+\emph{NeurIPS 34}.
+\url{https://proceedings.neurips.cc/paper/2021/hash/0f83556a305d789b1d71815e8ea4f4b0-Abstract.html}.
+
+\bibitem{hoyle2022} Hoyle, A., Goel, P., Sarkar, R., and Resnik, P. (2022).
+Are neural topic models broken? \emph{Findings of EMNLP}.
+\url{https://aclanthology.org/2022.findings-emnlp.390/}.
+\end{thebibliography}
+\end{document}

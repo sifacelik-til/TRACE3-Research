@@ -27,7 +27,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         default=None,
-        help="Detail output Excel path. Default: data/outputs/<factset_id>_supply_chain_detail.xlsx",
+        help="Detail output Excel path. Default: data/outputs/dataset_readers/<factset_id>_supply_chain_detail.xlsx",
     )
     parser.add_argument(
         "--profile_output",

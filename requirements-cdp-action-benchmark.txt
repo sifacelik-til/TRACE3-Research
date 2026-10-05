@@ -1,0 +1,13 @@
+# Install after the project's base requirements.txt.
+# The PyPI 2.14.1 Windows wheel fails to initialize c10.dll on this machine.
+# Install the pinned CPU wheel from PyTorch's official index as documented in
+# CDP_ACTION_TAXONOMY_BENCHMARK.md before installing this file.
+torch==2.6.0
+sentence-transformers==3.4.1
+huggingface-hub>=0.24
+# GTE multilingual's custom architecture uses the Transformers 4.x API.
+# Use jinaai/jina-embeddings-v3 with trusted remote code, not its 5.4+ -hf variant.
+transformers==4.57.1
+einops>=0.8
+joblib>=1.3
+threadpoolctl>=3.2

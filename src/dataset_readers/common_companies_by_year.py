@@ -2,11 +2,11 @@ from pathlib import Path
 import argparse
 import csv
 import re
-from tempfile import TemporaryDirectory
 import unicodedata
-
+import numpy  as np
 import pandas as pd
 import pyreadstat
+from openpyxl import load_workbook
 from rapidfuzz import fuzz, process
 from typing import Optional
 
@@ -14,22 +14,63 @@ try:
     from .cdp_read import (
         extract_many_from_2024_parquet,
         extract_many_from_legacy_xlsx,
+        find_header_row,
+        get_col_idx,
         parse_year_file,
     )
 except ImportError:
-    from cdp_read import (
+    from src.dataset_readers.cdp_read import (
         extract_many_from_2024_parquet,
         extract_many_from_legacy_xlsx,
+        find_header_row,
+        get_col_idx,
         parse_year_file,
     )
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-TRUCOST_RAW_PATH = (
+TRUCOST_DTA_PATH = (
     PROJECT_ROOT
     / "data/raw/Trucost (Access through WRDS)/trucost_2026_new.dta"
 )
+TRUCOST_FILTERED_PATH = (
+    PROJECT_ROOT
+    / "data/raw/Trucost (Access through WRDS)/trucost_2026_2015_onward.csv.gz"
+)
+TRUCOST_RAW_PATH = (
+    TRUCOST_FILTERED_PATH if TRUCOST_FILTERED_PATH.exists() else TRUCOST_DTA_PATH
+)
 LSEG_RAW_PATH = PROJECT_ROOT / "data/raw/LSEG/lseg_full_universe.csv"
+# Exclude low-coverage / out-of-scope LSEG source fields before chunks are read.
+# The aliases cover the exact spelling used in the current LSEG extract.
+LSEG_DROP_COLS = [
+    "target_ambition",
+    "verification",
+    "Env R&D Expenditures to Revenues USD in million",
+    "NOx Emissions to Revenues USD in million",
+    "CDP Internal Carbon Price per Tonne",
+    "CDP Internal Carbon Pricing",
+    "Total Renewable Energy",
+    "Electricity Produced from Other Renewables",
+    "Renewable Energy Produced",
+    "Total Energy Use from Properties",
+    "Long Term Set 1 Percentage of GHG Emissions Covered by Target",
+    "Climate Policy Statement",
+    "Resource Reduction Policy",
+    "Percentage of Green Products",
+    "Environmental Products",
+    "Climate Change Risks and Opportunities Strategy",
+]
+LSEG_DROP_ALIASES = {
+    "target_ambition": "Emissions Target Type",
+    "verification": "CSR Sustainability External Audit",
+    "Env R&D Expenditures to Revenues USD in million": (
+        "Env R&D Expenditures To Revenues in million"
+    ),
+    "Long Term Set 1 Percentage of GHG Emissions Covered by Target": (
+        "Long Term Set 1 Percentage of GHG Emission Covered by Target"
+    ),
+}
 FACTSET_RAW_PATH = (
     PROJECT_ROOT / "data/raw/FactSet/sym_entity_v1_full_12328/sym_entity.txt"
 )
@@ -41,19 +82,44 @@ FACTSET_SECTOR_PATH = (
     PROJECT_ROOT
     / "data/raw/FactSet/sym_entity_v1_full_12328/sym_entity_sector.txt"
 )
-# CDP_FACTSET_BRIDGE_PATH = (
-
 CDP_RAW_ROOT = PROJECT_ROOT / "data/raw/CDP"
-OUTPUT_PATH = PROJECT_ROOT / "data/processed/common_companies_by.csv"
 
-LSEG_FUZZY_THRESHOLD = 85.0
-FACTSET_FUZZY_THRESHOLD = 85.0
-CDP_FUZZY_THRESHOLD = 85.0
-WIDE_CSV_CHUNK_SIZE = 250
-STATA_CHUNK_SIZE = 5_000
+LSEG_FUZZY_THRESHOLD = 95.0
+FACTSET_FUZZY_THRESHOLD = 95.0
+CDP_FUZZY_THRESHOLD = 95.0
+CDP_NAME_THRESHOLD = CDP_FUZZY_THRESHOLD
+ISIN_PATTERN = re.compile(r"\b[A-Z]{2}[A-Z0-9]{9}[0-9]\b")
+WIDE_CSV_CHUNK_SIZE = 10_000
+STATA_CHUNK_SIZE = 25_000
 YEAR_CHUNK_SIZE = 250
 FACTSET_CHUNK_SIZE = 50_000
 FUZZY_CACHE_SIZE = 250_000
+DEFAULT_SEARCH_YEARS = tuple(range(2015, 2026))
+CDP_TRUCOST_FACTSET_YEARS = tuple(range(2016, 2026))
+MATCHED_PANEL_CACHE_PATH = (
+    PROJECT_ROOT / "data/processed/trucost_lseg_factset_matched_2015_2025.csv.gz"
+)
+CDP_TRUCOST_FACTSET_OUTPUT_DIR = (
+    PROJECT_ROOT / "data/processed/cdp_trucost_factset_common"
+)
+LSEG_POLICY_OUTPUT_COLUMNS = {
+    "Policy Emissions": "policy_emissions",
+    "Policy Energy Efficiency": "policy_energy_efficiency",
+    "Policy Environmental Supply Chain": "policy_environmental_supply_chain",
+    "Policy Sustainable Packaging": "policy_sustainable_packaging",
+    "Renewable/Clean Energy Products": "policy_clean_energy",
+    "Take-back and Recycling Initiatives": "take_back_recycling",
+    "Hybrid Vehicles": "hybrid_vehicles",
+    "Eco-Design Products": "eco_design",
+    "CSR Sustainability Reporting": "sustainability_reporting",
+    "Targets Energy Efficiency": "target_energy_efficiency",
+    "Transition Plan Offsets": "transition_plan_offsets",
+    "Internal Carbon Pricing": "internal_carbon_policy",
+    "Environmental Supply Chain Monitoring": "environmental_supply_chain_monitoring",
+    "Environmental Supply Chain Management": "environmental_supply_chain_management",
+    "Environmental Materials Sourcing": "environmental_materials_sourcing",
+    "ISO 14000 or EMS": "iso_14000_or_ems",
+}
 HIGH_CARBON_RISK_COUNTRIES = {
     "CN",
     "ID",
@@ -108,6 +174,26 @@ def find_columns(df: pd.DataFrame, candidates: list[str]) -> list[str]:
         for candidate in candidates
         if candidate.casefold() in lookup
     ]
+
+
+def normalize_column_name(column: str) -> str:
+    """Normalize LSEG headers for case- and whitespace-insensitive filtering."""
+    return re.sub(r"\s+", " ", str(column)).strip().casefold()
+
+
+LSEG_DROPPED_COLUMN_NAMES = {
+    normalize_column_name(column)
+    for column in [*LSEG_DROP_COLS, *LSEG_DROP_ALIASES.values()]
+}
+
+
+def is_dropped_lseg_column(column: str | None) -> bool:
+    return column is not None and normalize_column_name(column) in LSEG_DROPPED_COLUMN_NAMES
+
+
+def keep_lseg_columns(columns: list[str]) -> list[str]:
+    """Return resolved LSEG columns that are not configured for exclusion."""
+    return [column for column in columns if not is_dropped_lseg_column(column)]
 
 
 def normalize_name(value: object) -> str:
@@ -203,6 +289,22 @@ def read_selected_stata(path: Path, columns: list[str]):
     )
 
 
+def read_selected_trucost(path: Path, columns: list[str]):
+    """Yield selected Trucost columns from either the DTA or filtered gzip CSV."""
+    if path.suffix.lower() == ".dta":
+        yield from read_selected_stata(path, columns)
+        return
+
+    for chunk in pd.read_csv(
+        path,
+        compression="gzip" if path.suffix.lower() == ".gz" else None,
+        usecols=columns,
+        chunksize=STATA_CHUNK_SIZE,
+        low_memory=False,
+    ):
+        yield chunk
+
+
 def numeric_column(
     chunk: pd.DataFrame, column: str | None
 ) -> pd.Series:
@@ -261,90 +363,52 @@ def iter_lseg(
     lseg_instrument = find_column(
         lseg_header, ["Instrument", "instrument", "RIC"], required=False
     )
-    # Financials
-    revenue_columns = find_columns(
+    # Read only requested LSEG analysis fields (plus match identifiers).
+    # Revenue is retained for the HLM.  Prefer the standard LSEG Revenue
+    # field and use the taxonomy value only when the standard value is absent.
+    revenue_columns = keep_lseg_columns(find_columns(
         lseg_header, ["Revenue", "Total Revenue", "EU Taxonomy Total Revenue Amount"]
-    )
-    inventory_turnover_columns = find_columns(
+    ))
+    inventory_turnover_columns = keep_lseg_columns(find_columns(
         lseg_header, ["Inventory Turnover"]
-    )
-    number_of_employees_columns = find_columns(
+    ))
+    number_of_employees_columns = keep_lseg_columns(find_columns(
         lseg_header, ["Number of Employees"]
-    )
-    gross_profit_columns = find_columns(
+    ))
+    gross_profit_columns = keep_lseg_columns(find_columns(
         lseg_header, ["Gross Profit"]
-    )
-    operating_profit_columns = find_columns(
+    ))
+    operating_profit_columns = keep_lseg_columns(find_columns(
         lseg_header, ["Operating Profit"]
-    )
+    ))
     # ESG and policies
-    esg_columns = find_columns(
-        lseg_header, ["ESG Score", "LSEG ESG Score"]
-    )
-    policy_emissions_columns = find_columns(
+    esg_columns = keep_lseg_columns(find_columns(
+        lseg_header, ["ESG Score"]
+    ))
+    policy_emissions_columns = keep_lseg_columns(find_columns(
         lseg_header, ["Policy Emissions"]
-    )
-    carbon_price_columns = find_columns(
-        lseg_header,
-        ["Internal Carbon Pricing", "Internal Carbon Price per Tonne"],
-    )
-    renewable_total_columns = find_columns(
-        lseg_header,
-        ["Energy Use Total", "Total Renewable Energy", "Renewable Energy Use"],
-    )
-    renewable_component_columns = find_columns(
-        lseg_header,
-        [
-            "Renewable Energy Purchased",
-            "Renewable Energy Produced",
-            "Electricity Produced from Other Renewables",
-        ],
-    )
-    energy_use_columns = find_columns(
-        lseg_header,
-        ["Energy Use Total", "Total Energy Use from Properties"],
-    )
-    target_ambition_column = find_column(
-        lseg_header, ["Emissions Target Type"], required=False
-    )
-    target_coverage_columns = find_columns(
-        lseg_header,
-        ["Long Term Set 1 Percentage of GHG Emission Covered by Target"],
-    )
-    verification_column = find_column(
-        lseg_header, ["CSR Sustainability External Audit"], required=False
-    )
+    ))
+    carbon_price_columns: list[str] = []
+    renewable_total_columns: list[str] = []
+    renewable_component_columns: list[str] = []
+    energy_use_columns: list[str] = []
+    target_ambition_column: str | None = None
+    # target_coverage_columns = keep_lseg_columns(find_columns(
+    #     lseg_header,
+    #     ["Long Term Set 1 Percentage of GHG Emission Covered by Target"],
+    # ))
+    verification_column: str | None = None
     policy_columns = [
         find_column(lseg_header, [name], required=False)
-        for name in [
-            "Climate Policy Statement",
-            "Policy Emissions",
-            "Policy Energy Efficiency",
-            "Resource Reduction Policy",
-            "Policy Environmental Supply Chain",
-            "Policy Sustainable Packaging",
-            "Renewable/Clean Energy Products",
-            "Take-back and Recycling Initiatives",
-            "Hybrid Vehicles",
-            "Percentage of Green Products",
-            "Environmental Products",
-            "Eco-Design Products",
-            "CSR Sustainability Reporting",
-            "Targets Energy Efficiency",
-            "Transition Plan Offsets",
-            "Internal Carbon Pricing",
-            "Climate Change Risks and Opportunities Strategy",
-            "Supplier Environmental Commitment",
-            "Supplier Environmental Policy Communication",
-            "Supplier Environmental Policy Training",
-            "Supplier Environmental Risk Assessment",
-            "Environmental Supply Chain Management",
-            "Environmental Supply Chain Monitoring",
-            "Env Supply Chain Partnership Termination",
-            "Environmental Materials Sourcing",
-            "ISO 14000 or EMS",
-        ]
+        for name in LSEG_POLICY_OUTPUT_COLUMNS
     ]
+    verification_column = (
+        None if is_dropped_lseg_column(verification_column)
+        else verification_column
+    )
+    policy_columns = keep_lseg_columns(
+        [column for column in policy_columns if column is not None]
+    )
 
     lseg_columns = list(
         dict.fromkeys(
@@ -367,67 +431,49 @@ def iter_lseg(
                 *renewable_component_columns,
                 *energy_use_columns,
                 target_ambition_column,
-                *target_coverage_columns,
+                # *target_coverage_columns,
                 verification_column,
                 *policy_columns,
             ]
             if column
         )
     )
-    records = []
-    with LSEG_RAW_PATH.open(
-        "r", encoding="utf-8-sig", errors="replace", newline=""
-    ) as source:
-        reader = csv.DictReader(source)
-        for row in reader:
-            if requested_years is not None:
-                row_year = pd.to_numeric(row.get(lseg_year), errors="coerce")
-                if pd.isna(row_year) or int(row_year) not in requested_years:
-                    continue
-            records.append({column: row.get(column) for column in lseg_columns})
-            if len(records) < WIDE_CSV_CHUNK_SIZE:
+    # Let pandas' C parser select the required columns.  csv.DictReader first
+    # constructs a Python dictionary for every source column in every row,
+    # which dominates runtime on the wide LSEG extract.
+    reader = pd.read_csv(
+        LSEG_RAW_PATH,
+        usecols=lseg_columns,
+        dtype=str,
+        chunksize=WIDE_CSV_CHUNK_SIZE,
+        encoding="utf-8-sig",
+        encoding_errors="replace",
+        low_memory=False,
+    )
+    for chunk in reader:
+        if requested_years is not None:
+            chunk_years = pd.to_numeric(chunk[lseg_year], errors="coerce")
+            chunk = chunk[chunk_years.isin(requested_years)].copy()
+            if chunk.empty:
                 continue
-            chunk = pd.DataFrame.from_records(records, columns=lseg_columns)
-            records.clear()
-            yield transform_lseg_chunk(
-                chunk,
-                lseg_year,
-                lseg_sector,
-                lseg_name,
-                lseg_isin,
-                lseg_instrument,
-                revenue_columns,
-                esg_columns,
-                carbon_price_columns,
-                renewable_total_columns,
-                renewable_component_columns,
-                energy_use_columns,
-                target_ambition_column,
-                target_coverage_columns,
-                verification_column,
-                policy_columns,
-            )
-
-        if records:
-            chunk = pd.DataFrame.from_records(records, columns=lseg_columns)
-            yield transform_lseg_chunk(
-                chunk,
-                lseg_year,
-                lseg_sector,
-                lseg_name,
-                lseg_isin,
-                lseg_instrument,
-                revenue_columns,
-                esg_columns,
-                carbon_price_columns,
-                renewable_total_columns,
-                renewable_component_columns,
-                energy_use_columns,
-                target_ambition_column,
-                target_coverage_columns,
-                verification_column,
-                policy_columns,
-            )
+        yield transform_lseg_chunk(
+            chunk,
+            lseg_year,
+            lseg_sector,
+            lseg_name,
+            lseg_isin,
+            lseg_instrument,
+            revenue_columns,
+            esg_columns,
+            carbon_price_columns,
+            renewable_total_columns,
+            renewable_component_columns,
+            energy_use_columns,
+            target_ambition_column,
+            # target_coverage_columns,
+            verification_column,
+            policy_columns,
+        )
 
 
 def transform_lseg_chunk(
@@ -444,7 +490,7 @@ def transform_lseg_chunk(
     renewable_component_columns: list[str],
     energy_use_columns: list[str],
     target_ambition_column: str | None,
-    target_coverage_columns: list[str],
+    # target_coverage_columns: list[str],
     verification_column: str | None,
     policy_columns: list[str | None],
 ) -> pd.DataFrame:
@@ -495,15 +541,22 @@ def transform_lseg_chunk(
                 if target_ambition_column
                 else pd.NA
             ),
-            "target_coverage": coalesce_numeric_columns(
-                chunk, target_coverage_columns
-            ),
+            # "target_coverage": coalesce_numeric_columns(
+            #     chunk, target_coverage_columns
+            # ),
             "verification_status": binary_column(
                 chunk, verification_column
             ),
             "policy_adoption": policy_adoption,
         }
     )
+    lseg["renewable_energy_use"] = binary_column(
+        chunk, find_column(chunk, ["Renewable Energy Use"], required=False)
+    )
+    for source_column, output_column in LSEG_POLICY_OUTPUT_COLUMNS.items():
+        lseg[output_column] = binary_column(
+            chunk, find_column(chunk, [source_column], required=False)
+        )
     lseg["lseg_name_key"] = lseg["lseg_name"].map(normalize_name)
     lseg = lseg.dropna(subset=["year"])
     lseg["year"] = lseg["year"].astype(int)
@@ -517,11 +570,18 @@ def transform_lseg_chunk(
 def iter_trucost(
     requested_years: set[int] | None = None,
 ) -> pd.DataFrame:
-    header = pd.DataFrame(
-        columns=pd.io.stata.StataReader(
-            TRUCOST_RAW_PATH, convert_categoricals=False
-        ).variable_labels()
-    )
+    if TRUCOST_RAW_PATH.suffix.lower() == ".dta":
+        header = pd.DataFrame(
+            columns=pd.io.stata.StataReader(
+                TRUCOST_RAW_PATH, convert_categoricals=False
+            ).variable_labels()
+        )
+    else:
+        header = pd.read_csv(
+            TRUCOST_RAW_PATH,
+            compression="gzip" if TRUCOST_RAW_PATH.suffix.lower() == ".gz" else None,
+            nrows=0,
+        )
     year_column = find_column(header, ["fiscalyear", "fiscal_year", "year"])
     name_column = find_column(
         header, ["companyname", "company_name", "company name"]
@@ -536,9 +596,11 @@ def iter_trucost(
         header,
         ["di_319522", "trucost_revenue", "total_revenue"],
     )
-    # Emissions columns
+    # Emissions columns. Preserve the historic scope_2_emissions alias for
+    # location-based Scope 2, and extract market-based Scope 2 separately.
     scope_1_column = find_column(header, ["di_319413"])  # Scope 1
-    scope_2_column = find_column(header, ["di_319414"])  # Scope 2
+    scope_2_location_column = find_column(header, ["di_319414"])
+    scope_2_market_column = find_column(header, ["di_367750"], required=False)
     scope_3_upstream_column = find_column(header, ["di_319415"])  # Scope 3 Upstream
     scope_3_downstream_column = find_column(header, ["di_326737"])  # Scope 3 Downstream
     # Intensity columns (optional, if needed)
@@ -557,7 +619,8 @@ def iter_trucost(
                 id_column,
                 revenue_column,
                 scope_1_column,
-                scope_2_column,
+                scope_2_location_column,
+                scope_2_market_column,
                 scope_3_upstream_column,
                 scope_3_downstream_column,
                 scope_1_intensity_column,
@@ -569,7 +632,7 @@ def iter_trucost(
         )
     )
 
-    for chunk in read_selected_stata(TRUCOST_RAW_PATH, columns):
+    for chunk in read_selected_trucost(TRUCOST_RAW_PATH, columns):
         if requested_years is not None:
             chunk_years = pd.to_numeric(chunk[year_column], errors="coerce")
             chunk = chunk[chunk_years.isin(requested_years)].copy()
@@ -578,13 +641,19 @@ def iter_trucost(
 
         # Extract emissions separately
         scope_1_emissions = numeric_column(chunk, scope_1_column)
-        scope_2_emissions = numeric_column(chunk, scope_2_column)
+        scope_2_location_based_emissions = numeric_column(chunk, scope_2_location_column)
+        scope_2_market_based_emissions = numeric_column(chunk, scope_2_market_column)
         scope_3_upstream_emissions = numeric_column(chunk, scope_3_upstream_column)
         scope_3_downstream_emissions = numeric_column(chunk, scope_3_downstream_column)
 
         # Total emissions (optional)
         current_emissions = pd.concat(
-            [scope_1_emissions, scope_2_emissions, scope_3_upstream_emissions, scope_3_downstream_emissions],
+            [
+                scope_1_emissions,
+                scope_2_location_based_emissions,
+                scope_3_upstream_emissions,
+                scope_3_downstream_emissions,
+            ],
             axis=1,
         ).sum(axis=1, min_count=1)
 
@@ -623,7 +692,11 @@ def iter_trucost(
                 "trucost_revenue": revenue,
                 # Separate emissions columns
                 "scope_1_emissions": scope_1_emissions,
-                "scope_2_emissions": scope_2_emissions,
+                # scope_2_emissions remains a backwards-compatible alias for
+                # the location-based measure used in historical outputs.
+                "scope_2_emissions": scope_2_location_based_emissions,
+                "scope_2_location_based_emissions": scope_2_location_based_emissions,
+                "scope_2_market_based_emissions": scope_2_market_based_emissions,
                 "scope_3_upstream_emissions": scope_3_upstream_emissions,
                 "scope_3_downstream_emissions": scope_3_downstream_emissions,
                 "current_emissions": current_emissions,
@@ -663,12 +736,15 @@ def match_trucost_to_lseg(
         )
         if not isin_matches.empty:
             isin_matches["lseg_match_method"] = "year+isin"
-            isin_matches["lseg_name_score"] = isin_matches.apply(
-                lambda row: fuzz.WRatio(
-                    row["trucost_name_key"], row["lseg_name_key"]
-                ),
-                axis=1,
-            )
+            # Avoid DataFrame.apply(axis=1), which constructs a Series per
+            # match and is disproportionately expensive for large ISIN joins.
+            isin_matches["lseg_name_score"] = [
+                fuzz.WRatio(trucost_name, lseg_name)
+                for trucost_name, lseg_name in zip(
+                    isin_matches["trucost_name_key"],
+                    isin_matches["lseg_name_key"],
+                )
+            ]
             matched_parts.append(isin_matches)
             matched_ids.update(isin_matches["trucost_row_id"].astype(int))
 
@@ -868,7 +944,7 @@ def match_factset_names(common: pd.DataFrame) -> pd.DataFrame:
                         entity_id, entity_name = choice_data[matched_name]
                         best[target] = (float(score), entity_id, entity_name)
 
-        if chunk_number % 20 == 0:
+        if chunk_number % 25 == 0:
             print(
                 f"Scanned {chunk_number * FACTSET_CHUNK_SIZE:,} FactSet rows; "
                 f"matched {len(best):,}/{len(targets):,} names"
@@ -922,7 +998,7 @@ def load_lseg_supplier_policies(
         "Policy Energy Efficiency",
         "Renewable Energy Use",
         "Internal Carbon Pricing",
-        "Climate Policy Statement",
+        # "Climate Policy Statement",
         "Targets Energy Efficiency",
         "Transition Plan Offsets",
     ]
@@ -1084,7 +1160,6 @@ def get_supplier_policies_from_lseg(
         "Policy Energy Efficiency",
         "Renewable Energy Use",
         "Internal Carbon Pricing",
-        "Climate Policy Statement",
     ]
 
     for col in policy_columns:
@@ -1367,6 +1442,488 @@ def get_cdp_disclosing_supplier_years(
             disclosing["factset_entity_id"],
         )
     )
+
+
+def add_cdp_names(
+    companies: pd.DataFrame, cdp_organizations: pd.DataFrame
+) -> pd.DataFrame:
+    output = companies.copy()
+    output["in_cdp"] = False
+    output["cdp_name"] = pd.NA
+    output["cdp_match_method"] = pd.NA
+    output["cdp_name_score"] = pd.NA
+    if cdp_organizations.empty:
+        return output
+
+    isin_to_name = {
+        isin: row.cdp_name
+        for row in cdp_organizations.itertuples(index=False)
+        for isin in row.cdp_isins
+    }
+    names_by_key = (
+        cdp_organizations.assign(
+            cdp_name_key=cdp_organizations["cdp_name"].map(normalize_name)
+        )
+        .drop_duplicates("cdp_name_key")
+        .set_index("cdp_name_key")["cdp_name"]
+        .to_dict()
+    )
+    choices = list(names_by_key)
+
+    for index, row in output.iterrows():
+        company_isin = normalize_isin(row.get("isin"))
+        if company_isin in isin_to_name:
+            output.at[index, "in_cdp"] = True
+            output.at[index, "cdp_name"] = isin_to_name[company_isin]
+            output.at[index, "cdp_match_method"] = "year+isin"
+            output.at[index, "cdp_name_score"] = 100.0
+            continue
+
+        aliases = {
+            normalize_name(row.get("trucost_name")),
+            normalize_name(row.get("lseg_name")),
+            normalize_name(row.get("factset_name")),
+        } - {""}
+        best_match = None
+        for alias in aliases:
+            match = process.extractOne(
+                alias,
+                choices,
+                scorer=fuzz.WRatio,
+                score_cutoff=CDP_NAME_THRESHOLD,
+            )
+            if match is not None and (
+                best_match is None or match[1] > best_match[1]
+            ):
+                best_match = match
+        if best_match is None:
+            continue
+        name_key, score, _ = best_match
+        output.at[index, "in_cdp"] = True
+        output.at[index, "cdp_name"] = names_by_key[name_key]
+        output.at[index, "cdp_match_method"] = "year+fuzzy_name"
+        output.at[index, "cdp_name_score"] = float(score)
+    return output
+
+
+def cdp_organizations_from_matches(common: pd.DataFrame) -> pd.DataFrame:
+    matched = common[
+        common["cdp_org_name"].notna()
+        & common["cdp_org_name"].astype("string").str.strip().ne("")
+    ][["cdp_org_name", "cdp_isin"]].copy()
+    if matched.empty:
+        return pd.DataFrame(columns=["cdp_name", "cdp_isins"])
+    matched["cdp_name"] = matched["cdp_org_name"].astype(str).str.strip()
+    matched["normalized_isin"] = matched["cdp_isin"].map(normalize_isin)
+    return (
+        matched.groupby("cdp_name", as_index=False)["normalized_isin"]
+        .agg(lambda values: {value for value in values if value})
+        .rename(columns={"normalized_isin": "cdp_isins"})
+    )
+
+
+def extract_cdp_isins(value: object) -> set[str]:
+    if pd.isna(value):
+        return set()
+    return {
+        normalize_isin(match)
+        for match in ISIN_PATTERN.findall(str(value).upper())
+    }
+
+
+def read_cdp_organizations_for_year(
+    year: int, cdp_root: Path
+) -> pd.DataFrame:
+    year_dir = cdp_root / str(year)
+    if year in (2024, 2025):
+        if year == 2024:
+            summary_files = sorted(year_dir.glob("*c_isin*summary*.parquet"))
+        else:
+            summary_files = sorted((year_dir / "Climate Change").glob("*c_isin*summary*.parquet"))
+        if summary_files:
+            source = pd.read_parquet(summary_files[0])
+            lookup = {
+                str(column).casefold(): column for column in source.columns
+            }
+            name_column = next(
+                (
+                    lookup[candidate]
+                    for candidate in [
+                        "disclosing_organization",
+                        "organization_name",
+                        "organization",
+                    ]
+                    if candidate in lookup
+                ),
+                None,
+            )
+            isin_column = next(
+                (
+                    lookup[candidate]
+                    for candidate in ["isin", "primary_isin", "isins"]
+                    if candidate in lookup
+                ),
+                None,
+            )
+            if name_column is not None:
+                output = pd.DataFrame(
+                    {
+                        "cdp_name": (
+                            source[name_column].astype("string").str.strip()
+                        ),
+                        "cdp_isins": (
+                            source[isin_column].map(extract_cdp_isins)
+                            if isin_column is not None
+                            else [set() for _ in range(len(source))]
+                        ),
+                        "cdp_account_number": source[lookup["cdp_disclosing_org_number"]]
+                        if "cdp_disclosing_org_number" in lookup else pd.NA,
+                    }
+                )
+                return (
+                    output.dropna(subset=["cdp_name"])
+                    .drop_duplicates("cdp_account_number")
+                    .reset_index(drop=True)
+                )
+
+    path = parse_year_file(year_dir)
+    if path is None or path.suffix.casefold() == ".parquet":
+        return pd.DataFrame(columns=["cdp_name", "cdp_isins", "cdp_account_number"])
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    summary_name = (
+        "Summary Data"
+        if "Summary Data" in workbook.sheetnames
+        else "Summary"
+        if "Summary" in workbook.sheetnames
+        else None
+    )
+    if summary_name is None:
+        workbook.close()
+        return pd.DataFrame(columns=["cdp_name", "cdp_isins", "cdp_account_number"])
+    sheet = workbook[summary_name]
+    header_row = None
+    headers = []
+    for row_number, values in enumerate(
+        sheet.iter_rows(min_row=1, max_row=4, values_only=True), start=1
+    ):
+        candidate = ["" if value is None else str(value) for value in values]
+        if any(value.strip().casefold() in {"account_id", "account number"}
+               for value in candidate):
+            header_row, headers = row_number, candidate
+            break
+    if header_row is None:
+        workbook.close()
+        return pd.DataFrame(columns=["cdp_name", "cdp_isins", "cdp_account_number"])
+    name_index = get_col_idx(
+        headers,
+        ("organization", "organisation", "response organisation"),
+    )
+    isin_index = get_col_idx(headers, ("primary isin", "isins", "isin"))
+    account_index = next(
+        (index for index, header in enumerate(headers)
+         if str(header).strip().casefold() in {"account_id", "account number"}),
+        None,
+    )
+    rows = []
+    if name_index is not None:
+        for row in sheet.iter_rows(min_row=header_row + 1, values_only=True):
+            name = row[name_index] if name_index < len(row) else None
+            if pd.isna(name) or not str(name).strip():
+                continue
+            isin_value = (
+                row[isin_index]
+                if isin_index is not None and isin_index < len(row)
+                else None
+            )
+            rows.append(
+                {
+                    "cdp_name": str(name).strip(),
+                    "cdp_isins": extract_cdp_isins(isin_value),
+                    "cdp_account_number": (
+                        row[account_index] if account_index is not None
+                        and account_index < len(row) else pd.NA
+                    ),
+                }
+            )
+    workbook.close()
+    return pd.DataFrame(rows).drop_duplicates("cdp_account_number").reset_index(drop=True)
+
+
+def add_cdp_names_by_year(
+    companies: pd.DataFrame, cdp_root: Path | None
+) -> pd.DataFrame:
+    if cdp_root is None:
+        return add_cdp_names(
+            companies, cdp_organizations_from_matches(companies)
+        )
+    parts = []
+    for year, group in companies.groupby("year", sort=False):
+        organizations = read_cdp_organizations_for_year(
+            int(year), cdp_root
+        )
+        parts.append(add_cdp_names(group, organizations))
+    if not parts:
+        return add_cdp_names(
+            companies, pd.DataFrame(columns=["cdp_name", "cdp_isins"])
+        )
+    return pd.concat(parts, ignore_index=True).sort_index()
+
+
+def build_cdp_trucost_factset_common_panel(
+    years: tuple[int, ...] | list[int] | set[int] = CDP_TRUCOST_FACTSET_YEARS,
+    cdp_root: Path = CDP_RAW_ROOT,
+    matched_panel_cache_path: Path = MATCHED_PANEL_CACHE_PATH,
+    output_dir: Path = CDP_TRUCOST_FACTSET_OUTPUT_DIR,
+    fuzzy_threshold: float = CDP_FUZZY_THRESHOLD,
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
+    """Create the CDP--Trucost--FactSet company-year intersection.
+
+    CDP names and ISINs are read from each annual Summary/Summary Data sheet.
+    Within a year, exact ISIN is used first. Unresolved rows use the best
+    Trucost or FactSet name match and are retained only at the configured
+    fuzzy threshold. The matched panel and requested 2020--2024 and
+    2021--2024 balanced company lists are saved.
+    """
+    requested_years = tuple(sorted({int(year) for year in years}))
+    if not requested_years:
+        raise ValueError("At least one year is required.")
+    if not matched_panel_cache_path.exists():
+        raise FileNotFoundError(
+            "The matched Trucost--FactSet cache is required: "
+            f"{matched_panel_cache_path}"
+        )
+
+    base = pd.read_csv(
+        matched_panel_cache_path,
+        compression="gzip" if matched_panel_cache_path.suffix.casefold() == ".gz" else None,
+        low_memory=False,
+    )
+    required_columns = {
+        "year", "isin", "trucost_company_id", "trucost_name",
+        "factset_entity_id", "factset_name",
+    }
+    missing_columns = sorted(required_columns.difference(base.columns))
+    if missing_columns:
+        raise KeyError(f"Matched cache is missing required columns: {missing_columns}")
+
+    base["year"] = pd.to_numeric(base["year"], errors="coerce")
+    base = base.loc[base["year"].isin(requested_years)].copy()
+    base["year"] = base["year"].astype(int)
+    base["isin"] = base["isin"].map(normalize_isin)
+    base["trucost_name_key"] = base["trucost_name"].map(normalize_name)
+    base["factset_name_key"] = base["factset_name"].map(normalize_name)
+    base["factset_entity_id"] = base["factset_entity_id"].astype("string").str.strip()
+    base = base.loc[
+        base["trucost_name_key"].ne("")
+        & base["factset_entity_id"].notna()
+        & base["factset_entity_id"].ne("")
+    ].copy()
+
+    score_columns = [
+        column for column in ["lseg_name_score", "factset_name_score"]
+        if column in base.columns
+    ]
+    for column in score_columns:
+        base[column] = pd.to_numeric(base[column], errors="coerce")
+    base = (
+        base.sort_values(
+            ["year", "trucost_company_id", "factset_entity_id", *score_columns],
+            ascending=[True, True, True, *([False] * len(score_columns))],
+            na_position="last",
+        )
+        .drop_duplicates(["year", "trucost_company_id", "factset_entity_id"])
+        .reset_index(drop=True)
+    )
+    base["common_row_id"] = range(len(base))
+
+    match_rows: list[dict] = []
+    for year in requested_years:
+        year_match_start = len(match_rows)
+        year_base = base.loc[base["year"].eq(year)].copy()
+        if year_base.empty:
+            continue
+        print(f"Matching CDP {year}: {len(year_base):,} candidate company-years", flush=True)
+        try:
+            cdp = read_cdp_organizations_for_year(year, cdp_root)
+        except PermissionError as error:
+            raise PermissionError(
+                f"Cannot read the CDP {year} Summary sheet. Close the workbook "
+                "if it is open in Excel and confirm OneDrive has downloaded it."
+            ) from error
+        if cdp.empty:
+            print(f"{year}: no readable CDP summary sheet.")
+            continue
+        cdp = cdp.copy()
+        cdp["cdp_name"] = cdp["cdp_name"].astype("string").str.strip()
+        cdp["cdp_name_key"] = cdp["cdp_name"].map(normalize_name)
+        cdp = cdp.loc[cdp["cdp_name_key"].ne("")].copy()
+        cdp_by_name = (
+            cdp.groupby("cdp_name_key", as_index=False)
+            .agg(
+                cdp_name=("cdp_name", "first"),
+                cdp_account_number=("cdp_account_number", "first"),
+                cdp_isins=(
+                    "cdp_isins",
+                    lambda values: set().union(
+                        *(value if isinstance(value, set) else set() for value in values)
+                    ),
+                ),
+            )
+        )
+        if cdp_by_name.empty:
+            continue
+        cdp_lookup = cdp_by_name.set_index("cdp_name_key")
+        cdp_choices = cdp_by_name["cdp_name_key"].tolist()
+        cdp_choice_set = set(cdp_choices)
+        fuzzy_cache: dict[str, tuple | None] = {}
+        isin_to_cdp: dict[str, list[str]] = {}
+        for row in cdp_by_name.itertuples(index=False):
+            for isin in row.cdp_isins:
+                if isin:
+                    isin_to_cdp.setdefault(isin, []).append(row.cdp_name_key)
+
+        matched_ids: set[int] = set()
+        for row in year_base.itertuples(index=False):
+            cdp_keys = isin_to_cdp.get(row.isin, [])
+            if not cdp_keys:
+                continue
+            cdp_key = sorted(cdp_keys)[0]
+            cdp_row = cdp_lookup.loc[cdp_key]
+            match_rows.append(
+                {
+                    "common_row_id": row.common_row_id,
+                    "cdp_org_name": cdp_row["cdp_name"],
+                    "cdp_account_number": cdp_row["cdp_account_number"],
+                    "cdp_isins": "|".join(sorted(cdp_row["cdp_isins"])),
+                    "cdp_match_method": "year+isin",
+                    "cdp_name_score": 100.0,
+                }
+            )
+            matched_ids.add(int(row.common_row_id))
+
+        for row in year_base.loc[
+            ~year_base["common_row_id"].isin(matched_ids)
+        ].itertuples(index=False):
+            aliases = {row.trucost_name_key, row.factset_name_key} - {""}
+            best_match = None
+            for alias in aliases:
+                if alias in cdp_choice_set:
+                    result = (alias, 100.0, None)
+                else:
+                    if alias not in fuzzy_cache:
+                        fuzzy_cache[alias] = process.extractOne(
+                            alias, cdp_choices, scorer=fuzz.WRatio,
+                            score_cutoff=fuzzy_threshold,
+                        )
+                    result = fuzzy_cache[alias]
+                if result is not None and (
+                    best_match is None or result[1] > best_match[1]
+                ):
+                    best_match = result
+            if best_match is None:
+                continue
+            cdp_key, score, _ = best_match
+            cdp_row = cdp_lookup.loc[cdp_key]
+            match_rows.append(
+                {
+                    "common_row_id": row.common_row_id,
+                    "cdp_org_name": cdp_row["cdp_name"],
+                    "cdp_account_number": cdp_row["cdp_account_number"],
+                    "cdp_isins": "|".join(sorted(cdp_row["cdp_isins"])),
+                    "cdp_match_method": "year+fuzzy_name",
+                    "cdp_name_score": float(score),
+                }
+            )
+        print(f"Matched CDP {year}: {len(match_rows) - year_match_start:,}", flush=True)
+
+    match_columns = [
+        "common_row_id", "cdp_org_name", "cdp_account_number", "cdp_isins", "cdp_match_method",
+        "cdp_name_score",
+    ]
+    matched_cdp = (
+        pd.DataFrame(match_rows, columns=match_columns)
+        .sort_values(["common_row_id", "cdp_name_score"], ascending=[True, False])
+        .drop_duplicates("common_row_id")
+    )
+    common = (
+        base.merge(matched_cdp, on="common_row_id", how="inner")
+        .drop(columns=["common_row_id", "trucost_name_key", "factset_name_key"])
+        .sort_values(["year", "factset_entity_id", "trucost_company_id"])
+        .reset_index(drop=True)
+    )
+    common["balanced_company_id"] = common["factset_entity_id"].where(
+        common["factset_entity_id"].notna() & common["factset_entity_id"].ne(""),
+        common["isin"].where(common["isin"].ne(""), common["trucost_company_id"].astype(str)),
+    )
+    common = common.drop_duplicates(["year", "balanced_company_id"])
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    window = f"{min(requested_years)}_{max(requested_years)}"
+    common.to_csv(
+        output_dir / f"cdp_trucost_factset_common_{window}.csv.gz",
+        index=False, compression="gzip",
+    )
+    by_year = (
+        common.groupby("year", as_index=False)
+        .agg(
+            common_companies=("balanced_company_id", "nunique"),
+            isin_matches=("cdp_match_method", lambda values: values.eq("year+isin").sum()),
+            fuzzy_name_matches=(
+                "cdp_match_method",
+                lambda values: values.eq("year+fuzzy_name").sum(),
+            ),
+        )
+        .sort_values("year")
+    )
+    by_year.to_csv(
+        output_dir / f"cdp_trucost_factset_common_by_year_{window}.csv",
+        index=False,
+    )
+
+    def balanced_companies(required_years: set[int]) -> pd.DataFrame:
+        present = common.groupby("balanced_company_id")["year"].agg(set)
+        company_ids = present.loc[present.map(required_years.issubset)].index
+        selected = common.loc[common["balanced_company_id"].isin(company_ids)].copy()
+        latest = (
+            selected.sort_values(["balanced_company_id", "year"])
+            .groupby("balanced_company_id", as_index=False)
+            .tail(1)
+            .copy()
+        )
+        latest["years_present"] = latest["balanced_company_id"].map(
+            selected.groupby("balanced_company_id")["year"].agg(
+                lambda observed: "|".join(map(str, sorted(set(observed))))
+            )
+        )
+        return latest[
+            [
+                "balanced_company_id", "factset_entity_id", "factset_name",
+                "trucost_company_id", "trucost_name", "isin", "cdp_org_name",
+                "years_present",
+            ]
+        ].sort_values("factset_name", na_position="last").reset_index(drop=True)
+
+    balanced_windows = {
+        "2020_2024": set(range(2020, 2025)),
+        "2021_2024": set(range(2021, 2025)),
+    }
+    balanced_lists = {
+        label: balanced_companies(window_years)
+        for label, window_years in balanced_windows.items()
+    }
+    for label, companies in balanced_lists.items():
+        companies.to_csv(
+            output_dir / f"cdp_trucost_factset_companies_{label}.csv",
+            index=False,
+        )
+
+    print(
+        f"CDP--Trucost--FactSet: {len(common):,} matched company-years "
+        f"across {min(requested_years)}--{max(requested_years)}."
+    )
+    for label, companies in balanced_lists.items():
+        print(f"  {label}: {len(companies):,} companies present in every year.")
+    return common, balanced_lists
 
 
 def add_cdp_metrics(
@@ -1692,6 +2249,14 @@ def add_factset_supplier_metrics(common: pd.DataFrame, cdp_data: pd.DataFrame) -
         "suppliers_diversification",
         "suppliers_geographic_risk",
         "suppliers_contract_length",
+        "number_of_tier_1_suppliers",
+        "average_supplier_contract_duration_years",
+        "suppliers_carbon_intensive_region_pct",
+        "number_of_alternative_suppliers",
+        "supplier_climate_engagement_level",
+        "suppliers_reporting_emissions_pct",
+        "suppliers_with_reported_targets_pct",
+        "suppliers_with_science_based_targets_pct",
         # Add supplier policy columns
         "suppliers_with_emissions_policy_pct",
         "suppliers_with_energy_policy_pct",
@@ -1720,8 +2285,20 @@ def add_factset_supplier_metrics(common: pd.DataFrame, cdp_data: pd.DataFrame) -
             common[column] = pd.NA
         return common
 
-    # Add supplier policies from LSEG
-    relationships = get_supplier_policies_from_lseg(relationships)
+    supplier_lseg_policy_columns = [
+        "supplier_policy_emissions",
+        "supplier_policy_energy_efficiency",
+        "supplier_renewable_energy_use",
+        "supplier_internal_carbon_pricing",
+    ]
+    if "supplier_isin" in relationships.columns:
+        relationships = get_supplier_policies_from_lseg(relationships)
+    for column in supplier_lseg_policy_columns:
+        if column not in relationships.columns:
+            relationships[column] = pd.NA
+    relationships["supplier_lseg_policy_available"] = relationships[
+        supplier_lseg_policy_columns
+    ].notna().any(axis=1)
 
     supplier_ids = set(relationships["supplier_id"])
     attributes = load_factset_entity_attributes(supplier_ids)
@@ -1743,7 +2320,6 @@ def add_factset_supplier_metrics(common: pd.DataFrame, cdp_data: pd.DataFrame) -
             "current_emissions",
             "energy_mix_renewable_pct",
             "target_ambition",
-            "target_coverage",
             "cdp_target",
             "cdp_renewable_pct",
             "cdp_match_method",
@@ -1762,20 +2338,15 @@ def add_factset_supplier_metrics(common: pd.DataFrame, cdp_data: pd.DataFrame) -
     target_text = (
         relationships["target_ambition"].astype("string").fillna("").str.strip()
     )
-    target_coverage = pd.to_numeric(
-        relationships["target_coverage"], errors="coerce"
-    )
+    # target_coverage = pd.to_numeric(
+    #     relationships["target_coverage"], errors="coerce"
+    # )
     cdp_target = (
         relationships["cdp_target"].astype("string").fillna("").str.strip()
     )
-    relationships["supplier_has_target"] = pd.Series(
-        pd.NA, index=relationships.index, dtype="boolean"
-    )
-    target_observed = (
-        target_text.ne("") | target_coverage.notna() | cdp_target.ne("")
-    )
-    relationships.loc[target_observed, "supplier_has_target"] = (
-        target_text.ne("") | target_coverage.gt(0) | cdp_target.ne("")
+    target_observed = target_text.ne("") | cdp_target.ne("")
+    relationships["supplier_has_target"] = target_observed.where(
+        target_observed, pd.NA
     )
 
     # Renewable energy
@@ -1834,16 +2405,30 @@ def add_factset_supplier_metrics(common: pd.DataFrame, cdp_data: pd.DataFrame) -
         disclosing_pct = percentage_true(group["supplier_disclosing"])
 
         # Supplier policies
-        emissions_policy_pct = percentage_true(group["supplier_has_emissions_policy"])
-        energy_policy_pct = percentage_true(group["supplier_has_energy_policy"])
-        renewable_policy_pct = percentage_true(group["supplier_has_renewable_policy"])
-        carbon_pricing_pct = percentage_true(group["supplier_has_carbon_pricing"])
+        policy_data_available = group["supplier_lseg_policy_available"].any()
+        emissions_policy_pct = (
+            percentage_true(group["supplier_has_emissions_policy"])
+            if policy_data_available else pd.NA
+        )
+        energy_policy_pct = (
+            percentage_true(group["supplier_has_energy_policy"])
+            if policy_data_available else pd.NA
+        )
+        renewable_policy_pct = (
+            percentage_true(group["supplier_has_renewable_policy"])
+            if policy_data_available else pd.NA
+        )
+        carbon_pricing_pct = (
+            percentage_true(group["supplier_has_carbon_pricing"])
+            if policy_data_available else pd.NA
+        )
+        number_of_tier_1_suppliers = group["supplier_id"].nunique()
 
         rows.append(
             {
                 "year": year,
                 "factset_entity_id": company_id,
-                "num_suppliers": group["supplier_id"].nunique(),
+                "num_suppliers": number_of_tier_1_suppliers,
                 "suppliers_with_targets_pct": targets_pct,
                 "suppliers_disclosing_pct": disclosing_pct,
                 "suppliers_renewable_pct": percentage_true(
@@ -1862,6 +2447,25 @@ def add_factset_supplier_metrics(common: pd.DataFrame, cdp_data: pd.DataFrame) -
                 "suppliers_contract_length": group[
                     "contract_length_years"
                 ].mean(),
+                # Requested supplier-measure aliases. Alternative suppliers is
+                # a count proxy (other observed Tier-1 suppliers), not a
+                # direct measure of substitutability or capacity.
+                "number_of_tier_1_suppliers": number_of_tier_1_suppliers,
+                "average_supplier_contract_duration_years": group[
+                    "contract_length_years"
+                ].mean(),
+                "suppliers_carbon_intensive_region_pct": percentage_true(
+                    group["supplier_geographic_risk"]
+                ),
+                "number_of_alternative_suppliers": max(
+                    number_of_tier_1_suppliers - 1, 0
+                ),
+                "supplier_climate_engagement_level": classify_supplier_engagement(
+                    targets_pct, disclosing_pct
+                ),
+                "suppliers_reporting_emissions_pct": disclosing_pct,
+                "suppliers_with_reported_targets_pct": targets_pct,
+                "suppliers_with_science_based_targets_pct": targets_pct,
                 # Supplier policies
                 "suppliers_with_emissions_policy_pct": emissions_policy_pct,
                 "suppliers_with_energy_policy_pct": energy_policy_pct,
@@ -1877,13 +2481,322 @@ def add_factset_supplier_metrics(common: pd.DataFrame, cdp_data: pd.DataFrame) -
         how="left",
     )
 
+
+def load_matched_panel_cache(
+    cache_path: Path, requested_years: set[int]
+) -> pd.DataFrame | None:
+    """Load a valid matched-company cache for the requested years, if present."""
+    if not cache_path.exists():
+        return None
+    cached = pd.read_csv(
+        cache_path,
+        compression="gzip" if cache_path.suffix.lower() == ".gz" else None,
+        low_memory=False,
+    )
+    required = {
+        "year", "isin", "trucost_company_id", "lseg_instrument",
+        "lseg_name", "factset_entity_id", "factset_name",
+        "scope_1_emissions", "scope_2_location_based_emissions",
+        "scope_2_market_based_emissions", "scope_3_upstream_emissions",
+        "scope_3_downstream_emissions",
+    }
+    if not required.issubset(cached.columns):
+        return None
+    cached["year"] = pd.to_numeric(cached["year"], errors="coerce")
+    return cached[cached["year"].isin(requested_years)].copy()
+
+
+def refresh_cached_lseg_revenue(
+    cache_path: Path = MATCHED_PANEL_CACHE_PATH,
+    requested_years: set[int] | None = None,
+) -> pd.DataFrame:
+    """Add LSEG revenue to an already matched cache without re-running matching.
+
+    The matched panel stores the LSEG instrument identifier, so revenue can be
+    refreshed directly from LSEG on ``year`` and ``lseg_instrument``.  This
+    avoids re-reading Trucost or repeating the expensive name matching.
+    """
+    if not cache_path.exists():
+        raise FileNotFoundError(f"Matched-panel cache not found: {cache_path}")
+
+    selected_years = (
+        set(requested_years)
+        if requested_years is not None
+        else set(DEFAULT_SEARCH_YEARS)
+    )
+    cached = pd.read_csv(
+        cache_path,
+        compression="gzip" if cache_path.suffix.lower() == ".gz" else None,
+        low_memory=False,
+    )
+    required_columns = {"year", "lseg_instrument"}
+    missing_columns = required_columns.difference(cached.columns)
+    if missing_columns:
+        raise KeyError(
+            "The matched-panel cache cannot be refreshed because it lacks "
+            f"{sorted(missing_columns)}."
+        )
+
+    cached["year"] = pd.to_numeric(cached["year"], errors="coerce")
+    target_mask = cached["year"].isin(selected_years)
+    if not target_mask.any():
+        raise ValueError("The matched-panel cache has no rows in the requested years.")
+
+    lseg_parts = [
+        chunk[["year", "lseg_instrument", "lseg_revenue"]]
+        for chunk in iter_lseg(requested_years=selected_years)
+    ]
+    if not lseg_parts:
+        raise ValueError("No LSEG records were found in the requested years.")
+    lseg_revenue = pd.concat(lseg_parts, ignore_index=True)
+    lseg_revenue["lseg_instrument"] = (
+        lseg_revenue["lseg_instrument"].astype("string").str.strip()
+    )
+    lseg_revenue["lseg_revenue"] = pd.to_numeric(
+        lseg_revenue["lseg_revenue"], errors="coerce"
+    )
+    lseg_revenue = lseg_revenue.dropna(subset=["lseg_revenue"])
+    lseg_revenue = lseg_revenue[
+        lseg_revenue["lseg_instrument"].notna()
+        & lseg_revenue["lseg_instrument"].ne("")
+    ].drop_duplicates(["year", "lseg_instrument"], keep="last")
+
+    cache_target = cached.loc[target_mask, ["year", "lseg_instrument"]].copy()
+    cache_target["lseg_instrument"] = (
+        cache_target["lseg_instrument"].astype("string").str.strip()
+    )
+    cache_target["_cache_row"] = cache_target.index
+    refreshed = cache_target.merge(
+        lseg_revenue,
+        on=["year", "lseg_instrument"],
+        how="left",
+        validate="many_to_one",
+        sort=False,
+    ).set_index("_cache_row")["lseg_revenue"]
+
+    existing = pd.to_numeric(
+        cached.loc[refreshed.index, "lseg_revenue"], errors="coerce"
+    ) if "lseg_revenue" in cached else pd.Series(float("nan"), index=refreshed.index)
+    cached.loc[refreshed.index, "lseg_revenue"] = refreshed.combine_first(existing)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cached.to_csv(
+        cache_path,
+        index=False,
+        compression="gzip" if cache_path.suffix.lower() == ".gz" else None,
+    )
+    print(
+        f"Refreshed LSEG revenue for {refreshed.notna().sum():,} of "
+        f"{len(refreshed):,} cached company-years in {cache_path.name}."
+    )
+    return cached
+
+
+def refresh_cached_trucost_scope_2(
+    cache_path: Path = MATCHED_PANEL_CACHE_PATH,
+    requested_years: set[int] | None = None,
+) -> pd.DataFrame:
+    """Add distinct location- and market-based Scope 2 values to a matched cache.
+
+    The expensive company matching is already represented by Trucost company ID
+    in the cache.  This refresh therefore scans only the selected Trucost
+    columns and joins them on (year, Trucost company ID); it does not re-read
+    LSEG, FactSet, or CDP data and does not repeat name matching.
+    """
+    if not cache_path.exists():
+        raise FileNotFoundError(f"Matched-panel cache not found: {cache_path}")
+
+    selected_years = (
+        set(requested_years)
+        if requested_years is not None
+        else set(DEFAULT_SEARCH_YEARS)
+    )
+    cached = pd.read_csv(
+        cache_path,
+        compression="gzip" if cache_path.suffix.lower() == ".gz" else None,
+        low_memory=False,
+    )
+    required_columns = {"year", "trucost_company_id"}
+    missing_columns = required_columns.difference(cached.columns)
+    if missing_columns:
+        raise KeyError(
+            "The matched-panel cache cannot be refreshed because it lacks "
+            f"{sorted(missing_columns)}."
+        )
+
+    def normalized_company_id(values: pd.Series) -> pd.Series:
+        return (
+            values.astype("string")
+            .str.strip()
+            .str.replace(r"\.0+$", "", regex=True)
+        )
+
+    cached["year"] = pd.to_numeric(cached["year"], errors="coerce")
+    target = cached.loc[
+        cached["year"].isin(selected_years),
+        ["year", "trucost_company_id"],
+    ].copy()
+    if target.empty:
+        raise ValueError("The matched-panel cache has no rows in the requested years.")
+    target["_cache_row"] = target.index
+    target["_trucost_id_key"] = normalized_company_id(target["trucost_company_id"])
+    target_keys = target.loc[
+        target["_trucost_id_key"].notna() & target["_trucost_id_key"].ne(""),
+        ["year", "_trucost_id_key"],
+    ].drop_duplicates()
+
+    if TRUCOST_RAW_PATH.suffix.lower() == ".dta":
+        trucost_header = pd.DataFrame(
+            columns=pd.io.stata.StataReader(
+                TRUCOST_RAW_PATH, convert_categoricals=False
+            ).variable_labels()
+        )
+    else:
+        trucost_header = pd.read_csv(
+            TRUCOST_RAW_PATH,
+            compression="gzip" if TRUCOST_RAW_PATH.suffix.lower() == ".gz" else None,
+            nrows=0,
+        )
+    raw_year_column = find_column(
+        trucost_header, ["fiscalyear", "fiscal_year", "year"]
+    )
+    raw_id_column = find_column(
+        trucost_header, ["companyid", "company_id", "institutionid"]
+    )
+    raw_scope_2_location_column = find_column(trucost_header, ["di_319414"])
+    raw_scope_2_market_column = find_column(
+        trucost_header, ["di_367750"], required=False
+    )
+    raw_columns = list(
+        dict.fromkeys(
+            column
+            for column in [
+                raw_year_column,
+                raw_id_column,
+                raw_scope_2_location_column,
+                raw_scope_2_market_column,
+            ]
+            if column
+        )
+    )
+
+    scope_2_parts: list[pd.DataFrame] = []
+    for chunk_number, raw_chunk in enumerate(
+        read_selected_trucost(TRUCOST_RAW_PATH, raw_columns), start=1
+    ):
+        raw_year = pd.to_numeric(raw_chunk[raw_year_column], errors="coerce")
+        raw_chunk = raw_chunk[raw_year.isin(selected_years)].copy()
+        if raw_chunk.empty:
+            continue
+        scope_2 = pd.DataFrame(
+            {
+                "year": pd.to_numeric(
+                    raw_chunk[raw_year_column], errors="coerce"
+                ).astype("Int64"),
+                "trucost_company_id": raw_chunk[raw_id_column].astype("string"),
+                "scope_2_location_based_emissions": numeric_column(
+                    raw_chunk, raw_scope_2_location_column
+                ),
+                "scope_2_market_based_emissions": numeric_column(
+                    raw_chunk, raw_scope_2_market_column
+                ),
+            }
+        ).dropna(subset=["year"])
+        scope_2["_trucost_id_key"] = normalized_company_id(
+            scope_2["trucost_company_id"]
+        )
+        scope_2 = scope_2.merge(
+            target_keys,
+            on=["year", "_trucost_id_key"],
+            how="inner",
+            validate="many_to_one",
+        )
+        if not scope_2.empty:
+            scope_2_parts.append(scope_2)
+        if chunk_number % 25 == 0:
+            print(f"Read {chunk_number:,} selected Trucost chunks for Scope 2 refresh")
+
+    if not scope_2_parts:
+        raise ValueError("No cached company-years were found in the selected Trucost data.")
+    source_scope_2 = (
+        pd.concat(scope_2_parts, ignore_index=True)
+        .sort_values(["year", "_trucost_id_key"])
+        .drop_duplicates(["year", "_trucost_id_key"], keep="first")
+    )
+    refreshed = (
+        target.merge(
+            source_scope_2[
+                [
+                    "year",
+                    "_trucost_id_key",
+                    "scope_2_location_based_emissions",
+                    "scope_2_market_based_emissions",
+                ]
+            ],
+            on=["year", "_trucost_id_key"],
+            how="left",
+            validate="many_to_one",
+            sort=False,
+        )
+        .set_index("_cache_row")
+    )
+
+    existing_location = pd.to_numeric(
+        cached.get(
+            "scope_2_location_based_emissions",
+            cached.get("scope_2_emissions", pd.Series(np.nan, index=cached.index)),
+        ),
+        errors="coerce",
+    )
+    existing_market = pd.to_numeric(
+        cached.get(
+            "scope_2_market_based_emissions",
+            pd.Series(np.nan, index=cached.index),
+        ),
+        errors="coerce",
+    )
+    source_location = pd.to_numeric(
+        refreshed["scope_2_location_based_emissions"], errors="coerce"
+    )
+    source_market = pd.to_numeric(
+        refreshed["scope_2_market_based_emissions"], errors="coerce"
+    )
+    refreshed_location = source_location.combine_first(
+        existing_location.reindex(refreshed.index)
+    )
+    refreshed_market = source_market.combine_first(
+        existing_market.reindex(refreshed.index)
+    )
+    cached.loc[refreshed.index, "scope_2_location_based_emissions"] = (
+        refreshed_location
+    )
+    cached.loc[refreshed.index, "scope_2_market_based_emissions"] = refreshed_market
+    cached.loc[refreshed.index, "scope_2_emissions"] = refreshed_location
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cached.to_csv(
+        cache_path,
+        index=False,
+        compression="gzip" if cache_path.suffix.lower() == ".gz" else None,
+    )
+    print(
+        f"Refreshed distinct Scope 2 fields for {len(refreshed):,} cached "
+        f"company-years; market-based Scope 2 is available for "
+        f"{refreshed_market.notna().sum():,} rows."
+    )
+    return cached
+
+
 def find_common_companies(
     years: range | list[int] | set[int] | tuple[int, ...] | None = None,
     cdp_path: Path | None = None,
     cdp_root: Path | None = CDP_RAW_ROOT,
     names_only: bool = False,
+    matched_panel_cache_path: Path | None = MATCHED_PANEL_CACHE_PATH,
+    refresh_matched_panel_cache: bool = False,
 ) -> pd.DataFrame:
-    requested_years = set(years) if years is not None else None
+    # Keep default runs focused on the requested 2015–2025 research window;
+    # callers can still supply an explicit iterable to override it.
+    requested_years = set(years) if years is not None else set(DEFAULT_SEARCH_YEARS)
     intermediate_columns = [
         "year",
         "isin",
@@ -1902,114 +2815,121 @@ def find_common_companies(
         "carbon_price_internal",
         "energy_mix_renewable_pct",
         "target_ambition",
-        "target_coverage",
+        # "target_coverage",
         "verification_status",
-        "policy_adoption",
+        "inventory_turnover",
+        "number_of_employees",
+        "gross_profit",
+        "operating_profit",
+        "renewable_energy_use",
+        *LSEG_POLICY_OUTPUT_COLUMNS.values(),
+        "scope_1_emissions",
+        "scope_2_emissions",
+        "scope_2_location_based_emissions",
+        "scope_2_market_based_emissions",
+        "scope_3_upstream_emissions",
+        "scope_3_downstream_emissions",
         "lseg_match_method",
         "lseg_name_score",
         "trucost_lseg_name_exact",
         "trucost_name_key",
         "lseg_name_key",
     ]
+    cached_common = (
+        None
+        if refresh_matched_panel_cache or matched_panel_cache_path is None
+        else load_matched_panel_cache(matched_panel_cache_path, requested_years)
+    )
+    use_cached_matches = cached_common is not None and not cached_common.empty
     matched_records: dict[tuple[int, str], dict] = {}
+    if use_cached_matches:
+        print(
+            f"Loaded {len(cached_common):,} matched company-years directly from "
+            f"{matched_panel_cache_path.name}; skipped LSEG, Trucost, and FactSet "
+            "name matching."
+        )
 
-    with TemporaryDirectory(prefix="common_companies_") as temporary_directory:
-        temporary_path = Path(temporary_directory)
-        lseg_path = temporary_path / "lseg"
-        lseg_path.mkdir()
-        lseg_years: set[int] = set()
-        lseg_selected_rows = 0
+    # Keep only the selected, transformed LSEG rows in year partitions.  The
+    # prior implementation appended every small chunk to temporary CSV files
+    # and later parsed those files again.  This avoids both disk I/O and type
+    # conversion while retaining the same year-level matching behavior.
+    lseg_parts_by_year: dict[int, list[pd.DataFrame]] = {}
+    lseg_selected_rows = 0
+    for chunk_number, lseg in enumerate(
+        () if use_cached_matches else iter_lseg(requested_years=requested_years),
+        start=1,
+    ):
+        lseg_selected_rows += len(lseg)
+        for year, year_lseg in lseg.groupby("year", sort=False):
+            lseg_parts_by_year.setdefault(int(year), []).append(year_lseg)
+        if chunk_number % 25 == 0:
+            print(f"Loaded {lseg_selected_rows:,} selected LSEG rows")
 
-        for chunk_number, lseg in enumerate(
-            iter_lseg(requested_years=requested_years), start=1
-        ):
-            lseg_selected_rows += len(lseg)
-            for year, year_lseg in lseg.groupby("year", sort=False):
-                year = int(year)
-                year_path = lseg_path / f"{year}.csv"
-                year_lseg.to_csv(
-                    year_path,
-                    mode="a",
-                    header=not year_path.exists(),
-                    index=False,
-                )
-                lseg_years.add(year)
-            if chunk_number % 20 == 0:
-                print(
-                    f"Partitioned {lseg_selected_rows:,} selected "
-                    "LSEG rows by year"
-                )
+    lseg_cache: dict[int, pd.DataFrame] = {}
+    blocks_cache: dict[int, dict[str, list[str]]] = {}
+    for year, parts in lseg_parts_by_year.items():
+        year_lseg = pd.concat(parts, ignore_index=True).drop_duplicates(
+            ["lseg_name_key", "lseg_isin", "lseg_instrument"]
+        )
+        blocks: dict[str, list[str]] = {}
+        for name in year_lseg["lseg_name_key"].drop_duplicates():
+            for key in blocking_keys(name):
+                blocks.setdefault(key, []).append(name)
+        lseg_cache[year] = year_lseg
+        blocks_cache[year] = blocks
 
-        lseg_cache: dict[int, pd.DataFrame] = {}
-        blocks_cache: dict[int, dict[str, list[str]]] = {}
-        fuzzy_cache: dict[
-            tuple[int, str], tuple[str, float] | None
-        ] = {}
-        trucost_selected_rows = 0
+    lseg_years = set(lseg_cache)
+    fuzzy_cache: dict[tuple[int, str], tuple[str, float] | None] = {}
+    trucost_selected_rows = 0
 
-        for chunk_number, trucost in enumerate(
-            iter_trucost(requested_years=requested_years), start=1
-        ):
-            trucost_selected_rows += len(trucost)
-            for year, year_trucost in trucost.groupby("year", sort=False):
-                year = int(year)
-                if year not in lseg_years:
-                    continue
+    for chunk_number, trucost in enumerate(
+        () if use_cached_matches else iter_trucost(requested_years=requested_years),
+        start=1,
+    ):
+        trucost_selected_rows += len(trucost)
+        for year, year_trucost in trucost.groupby("year", sort=False):
+            year = int(year)
+            if year not in lseg_years:
+                continue
 
-                if year not in lseg_cache:
-                    year_lseg = pd.read_csv(
-                        lseg_path / f"{year}.csv",
-                        dtype=str,
-                        low_memory=False,
-                    ).drop_duplicates(
-                        ["lseg_name_key", "lseg_isin", "lseg_instrument"]
-                    )
-                    year_lseg["year"] = year
-                    blocks: dict[str, list[str]] = {}
-                    for name in year_lseg["lseg_name_key"].drop_duplicates():
-                        for key in blocking_keys(name):
-                            blocks.setdefault(key, []).append(name)
-                    lseg_cache[year] = year_lseg
-                    blocks_cache[year] = blocks
+            year_trucost = year_trucost.reset_index(drop=True)
+            year_trucost["trucost_name_key"] = (
+                year_trucost["trucost_name_key"].fillna("")
+            )
+            year_trucost["trucost_isin"] = (
+                year_trucost["trucost_isin"].fillna("")
+            )
+            year_trucost["trucost_row_id"] = range(len(year_trucost))
+            matches = match_trucost_to_lseg(
+                year_trucost,
+                lseg_cache[year],
+                lseg_names_by_block={year: blocks_cache[year]},
+                fuzzy_cache=fuzzy_cache,
+            )
+            if matches.empty:
+                continue
 
-                year_trucost = year_trucost.reset_index(drop=True)
-                year_trucost["trucost_name_key"] = (
-                    year_trucost["trucost_name_key"].fillna("")
-                )
-                year_trucost["trucost_isin"] = (
-                    year_trucost["trucost_isin"].fillna("")
-                )
-                year_trucost["trucost_row_id"] = range(len(year_trucost))
-                matches = match_trucost_to_lseg(
-                    year_trucost,
-                    lseg_cache[year],
-                    lseg_names_by_block={year: blocks_cache[year]},
-                    fuzzy_cache=fuzzy_cache,
-                )
-                if matches.empty:
-                    continue
+            matches["isin"] = matches["lseg_isin"].map(normalize_isin)
+            matches = matches[matches["isin"] != ""].drop_duplicates("isin")
+            matches["year"] = year
+            matches["isin_valid"] = matches["isin"].map(is_valid_isin)
+            matches["lseg_name_score"] = pd.to_numeric(
+                matches["lseg_name_score"], errors="coerce"
+            )
+            matches["trucost_lseg_name_exact"] = (
+                matches["trucost_name_key"] == matches["lseg_name_key"]
+            )
+            for record in matches[intermediate_columns].to_dict("records"):
+                key = (year, record["isin"])
+                matched_records.setdefault(key, record)
 
-                matches["isin"] = matches["lseg_isin"].map(normalize_isin)
-                matches = matches[matches["isin"] != ""].drop_duplicates("isin")
-                matches["year"] = year
-                matches["isin_valid"] = matches["isin"].map(is_valid_isin)
-                matches["lseg_name_score"] = pd.to_numeric(
-                    matches["lseg_name_score"], errors="coerce"
-                )
-                matches["trucost_lseg_name_exact"] = (
-                    matches["trucost_name_key"] == matches["lseg_name_key"]
-                )
-                for record in matches[intermediate_columns].to_dict("records"):
-                    key = (year, record["isin"])
-                    matched_records.setdefault(key, record)
+        if chunk_number % 25 == 0:
+            print(
+                f"Processed {trucost_selected_rows:,} selected Trucost rows; "
+                f"matched {len(matched_records):,} company-years"
+            )
 
-            if chunk_number % 20 == 0:
-                print(
-                    f"Processed {trucost_selected_rows:,} selected Trucost rows; "
-                    f"matched {len(matched_records):,} company-years"
-                )
-
-    if not matched_records:
+    if not use_cached_matches and not matched_records:
         return pd.DataFrame(
             columns=[
                 "year",
@@ -2030,9 +2950,11 @@ def find_common_companies(
                 "carbon_price_internal",
                 "energy_mix_renewable_pct",
                 "target_ambition",
-                "target_coverage",
+                # "target_coverage",
                 "verification_status",
                 "policy_adoption",
+                "in_cdp",
+                "cdp_name",
                 "cdp_org_name",
                 "cdp_isin",
                 "cdp_emissions",
@@ -2059,15 +2981,36 @@ def find_common_companies(
             ]
         )
 
-    common = pd.DataFrame.from_records(list(matched_records.values()))
-    common = match_factset_names(common)
-    if common.empty:
-        return common
-
-    common["factset_name_exact"] = common["factset_name_score"] == 100
+    # Cache hits preserve every cached matched row and move straight to the
+    # downstream calculations below (revenue, CDP, and supplier metrics).
+    # Reconstructing a dictionary keyed by year/ISIN here previously discarded
+    # legitimate cross-listed rows before those calculations could run.
+    common = (
+        cached_common.copy()
+        if use_cached_matches
+        else pd.DataFrame.from_records(list(matched_records.values()))
+    )
+    if not use_cached_matches:
+        common = match_factset_names(common)
+        if common.empty:
+            return common
+        common["factset_name_exact"] = common["factset_name_score"] == 100
+    elif "factset_name_exact" not in common.columns:
+        common["factset_name_exact"] = common["factset_name_score"] == 100
     common["revenue"] = pd.to_numeric(
         common["trucost_revenue"], errors="coerce"
     ).fillna(pd.to_numeric(common["lseg_revenue"], errors="coerce"))
+    if not use_cached_matches and matched_panel_cache_path is not None:
+        matched_panel_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        common.to_csv(
+            matched_panel_cache_path,
+            index=False,
+            compression="gzip" if matched_panel_cache_path.suffix.lower() == ".gz" else None,
+        )
+        print(
+            f"Saved {len(common):,} matched company-years to "
+            f"{matched_panel_cache_path.name}."
+        )
     if names_only:
         return (
             common[
@@ -2078,8 +3021,12 @@ def find_common_companies(
                     "trucost_name",
                     "lseg_instrument",
                     "lseg_name",
+                    "lseg_match_method",
+                    "lseg_name_score",
                     "factset_entity_id",
                     "factset_name",
+                    "factset_name_score",
+                    "factset_name_exact",
                 ]
             ]
             .drop_duplicates(["year", "isin", "factset_entity_id"])
@@ -2095,249 +3042,56 @@ def find_common_companies(
         if cdp_root is not None
         else add_cdp_metrics(common, None)
     )
+    common = add_cdp_names_by_year(common, cdp_root)
     cdp_data = read_cdp_company_year(cdp_path) if cdp_path else pd.DataFrame()
     common = add_factset_supplier_metrics(common, cdp_data)
 
-    # === Add Policy/Initiative Scores ===
-    # Define all policy columns (from LSEG)
-    climate_policy_cols = [
-        "Climate Policy Statement",
-        "Climate Commitment",
-        "Policy Emissions",
-        "Internal Carbon Pricing",
-        "Climate Change Risks and Opportunities Strategy",
-        "Transition Plan Offsets",
-    ]
-    energy_policy_cols = [
-        "Policy Energy Efficiency",
-        "Targets Energy Efficiency",
-        "Energy Commitment",
-    ]
-    supply_chain_policy_cols = [
-        "Policy Environmental Supply Chain",
-        "Supplier Environmental Commitment",
-        "Supplier Environmental Policy Communication",
-        "Supplier Environmental Policy Training",
-        "Supplier Environmental Risk Assessment",
-        "Environmental Supply Chain Management",
-        "Environmental Supply Chain Monitoring",
-        "Env Supply Chain Partnership Termination",
-    ]
-    circular_economy_cols = [
-        "Policy Sustainable Packaging",
-        "Resource Reduction Targets",
-        "Take-back and Recycling Initiatives",
-        "Eco-Design Products",
-    ]
-    environmental_product_cols = [
-        "Environmental Products",
-        "Eco-Design Products",
-        "Renewable/Clean Energy Products",
-        "Water Technologies",
-        "Hybrid Vehicles",
-    ]
-    environmental_policy_cols = list(dict.fromkeys(
-        climate_policy_cols
-        + energy_policy_cols
-        + supply_chain_policy_cols
-        + circular_economy_cols
-        + ["Environmental Materials Sourcing", "ISO 14000 or EMS"]
-    ))
-
-    # Helper functions
-    def count_true(df: pd.DataFrame, columns: list[str]) -> pd.Series:
-        return df[columns].fillna(False).astype(bool).sum(axis=1)
-
-    def percentage_true(df: pd.DataFrame, columns: list[str]) -> pd.Series:
-        return count_true(df, columns) / len(columns) * 100
-
-    # Compute scores
-    common["Number of Climate Policies"] = count_true(common, climate_policy_cols)
-    common["Number of Energy Policies"] = count_true(common, energy_policy_cols)
-    common["Number of Supply Chain Environmental Policies"] = count_true(common, supply_chain_policy_cols)
-    common["Number of Circular Economy Initiatives"] = count_true(common, circular_economy_cols)
-    common["Number of Green Products/Services"] = count_true(common, environmental_product_cols)
-    common["Number of Environmental Policies"] = count_true(common, environmental_policy_cols)
-    common["Environmental Policy Coverage Score"] = percentage_true(common, environmental_policy_cols)
-
-    # Targets
-    target_existence_cols = [
-        "Targets Energy Efficiency",
-        "Resource Reduction Targets",
-        "Emissions Target Type",
-    ]
-    common["Number of Environmental Targets"] = count_true(common, target_existence_cols)
-
-    # GHG targets
-    ghg_target_cols = [
-        "Long Term Set 1 Percentage of GHG Emission Covered by Target",
-        "Long Term Set 1 GHG Emission Base Year",
-        "Long Term Set 1 GHG Emission Target Year",
-        "Long Term Set 1 GHG Emission Percentage Reduction Targeted",
-        "Emissions Target Type",
-    ]
-    common["Number of GHG Target Fields Disclosed"] = common[ghg_target_cols].notna().sum(axis=1)
-
-    # Climate governance
-    climate_governance_cols = [
-        "TPI Management Question6",  # Board responsibility
-        "TPI Management Question14",  # Remuneration
-    ]
-    common["Climate Governance Score"] = percentage_true(common, climate_governance_cols)
-
-    # Climate strategy
-    climate_strategy_cols = [
-        "Climate Change Risks and Opportunities Strategy",
-        "TPI Management Question11",  # Climate risk management
-        "TPI Management Question15",  # Strategy
-        "TPI Management Question16",  # Scenario planning
-        "TPI Management Question17",  # Carbon price
-    ]
-    common["Climate Strategy Score"] = percentage_true(common, climate_strategy_cols)
-
-    # Climate disclosure
-    climate_disclosure_cols = [
-        "TPI Management Question5",   # Scope 1/2 disclosure
-        "TPI Management Question8",   # Scope 3
-        "TPI Management Question9",   # Verification
-        "TPI Management Question12",  # Material Scope 3
-    ]
-    common["Climate Disclosure Completeness Score"] = percentage_true(common, climate_disclosure_cols)
-
-    # Policy implementation
-    implementation_cols = list(dict.fromkeys(
-        climate_policy_cols
-        + energy_policy_cols
-        + supply_chain_policy_cols
-        + circular_economy_cols
-        + ["Environmental Materials Sourcing", "ISO 14000 or EMS"]
-    ))
-    common["Policy Implementation Score"] = percentage_true(common, implementation_cols)
-
-    # Renewable energy
-    renewable_cols = [
-        "Renewable Energy Use",
-        "Total Renewable Energy",
-        "Electricity Produced from Other Renewables",
-        "Electricity Produced from Solar",
-        "Electricity Produced from Wind",
-    ]
-    common["Number of Renewable Energy Initiatives"] = count_true(common, renewable_cols)
-
-    # Supply chain ESG coverage
-    common["Supply Chain ESG Coverage Score"] = percentage_true(common, supply_chain_policy_cols)
-
-    # Circular economy
-    common["Circular Economy Policy Score"] = percentage_true(common, circular_economy_cols)
-
-    # Green products
-    common["Green Product Coverage Score"] = percentage_true(common, environmental_product_cols)
-
-    # Overall score
-    score_components = [
-        "Environmental Policy Coverage Score",
-        "Climate Governance Score",
-        "Climate Strategy Score",
-        "Climate Disclosure Completeness Score",
-        "Policy Implementation Score",
-        "Supply Chain ESG Coverage Score",
-        "Circular Economy Policy Score",
-        "Green Product Coverage Score",
-    ]
-    common["Overall Environmental Management Score"] = common[score_components].mean(axis=1)
-
-    # === Reorder Columns ===
-    output_columns = [
+    # Deliver the compact analysis panel requested for this model. CDP fields
+    # remain available only upstream to construct supplier disclosure/target
+    # measures; unrelated legacy LSEG and score columns are intentionally not
+    # retained in the output.
+    requested_output_columns = [
         "year",
         "isin",
-        "isin_valid",
         "trucost_name",
         "lseg_name",
         "lseg_instrument",
-        "cdp_org_name",
-        "factset_name",
         "factset_entity_id",
-        # Revenue
-        "lseg_revenue",
-        "trucost_revenue",
-        "revenue",
-        # LSEG financials
+        "factset_name",
+        "scope_1_emissions",
+        "scope_2_emissions",
+        "scope_2_location_based_emissions",
+        "scope_2_market_based_emissions",
+        "scope_3_upstream_emissions",
+        "scope_3_downstream_emissions",
+        "current_emissions",
+        "esg_score",
         "inventory_turnover",
         "number_of_employees",
         "gross_profit",
         "operating_profit",
-        # ESG and policies
-        "esg_score",
-        "policy_emissions",
-        "Internal Carbon Pricing",
-        "carbon_price_internal",
-        # Emissions (separate scopes)
-        "scope_1_emissions",
-        "scope_2_emissions",
-        "scope_3_upstream_emissions",
-        "scope_3_downstream_emissions",
-        "current_emissions",
-        "emissions_intensity",
-        "suppliers_emissions",
-        "suppliers_emissions_intensity",
-        # Targets and verification
-        "target_ambition",
-        "target_coverage",
-        "verification_status",
-        # Policy scores
-        "Number of Climate Policies",
-        "Number of Energy Policies",
-        "Number of Supply Chain Environmental Policies",
-        "Number of Circular Economy Initiatives",
-        "Number of Green Products/Services",
-        "Number of Environmental Policies",
-        "Environmental Policy Coverage Score",
-        "Number of Environmental Targets",
-        "Number of GHG Target Fields Disclosed",
-        "Climate Governance Score",
-        "Climate Strategy Score",
-        "Climate Disclosure Completeness Score",
-        "Policy Implementation Score",
-        "Supply Chain ESG Coverage Score",
-        "Circular Economy Policy Score",
-        "Green Product Coverage Score",
-        "Overall Environmental Management Score",
-        # CDP metrics
-        "cdp_isin",
-        "cdp_emissions",
-        "cdp_target",
-        "cdp_renewable_pct",
-        "cdp_match_method",
-        "cdp_name_score",
-        # Supply chain metrics
-        "num_suppliers",
-        "suppliers_with_targets_pct",
-        "suppliers_disclosing_pct",
-        "suppliers_renewable_pct",
-        "suppliers_engagement_level",
+        "renewable_energy_use",
+        *LSEG_POLICY_OUTPUT_COLUMNS.values(),
+        "number_of_tier_1_suppliers",
+        "average_supplier_contract_duration_years",
+        "suppliers_carbon_intensive_region_pct",
+        "number_of_alternative_suppliers",
+        "supplier_climate_engagement_level",
         "suppliers_high_emission_pct",
-        "suppliers_diversification",
-        "suppliers_geographic_risk",
-        "suppliers_contract_length",
-        # Add supplier policy columns
-        "suppliers_with_emissions_policy_pct",
-        "suppliers_with_energy_policy_pct",
-        "suppliers_with_renewable_policy_pct",
-        "suppliers_with_carbon_pricing_pct",
-        # Matching metadata
+        "suppliers_reporting_emissions_pct",
+        "suppliers_with_reported_targets_pct",
+        "suppliers_with_science_based_targets_pct",
         "lseg_match_method",
         "lseg_name_score",
-        "trucost_lseg_name_exact",
         "factset_name_score",
-        "factset_name_exact",
     ]
-
     return (
-        common[output_columns]
+        common[requested_output_columns]
         .drop_duplicates(["year", "isin", "factset_entity_id"])
         .sort_values(["year", "trucost_name", "isin"])
         .reset_index(drop=True)
     )
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Find companies shared by Trucost, LSEG, and FactSet."
@@ -2346,7 +3100,7 @@ if __name__ == "__main__":
         "year",
         nargs="?",
         type=int,
-        help="Fiscal year to process.",
+        help="Fiscal year to process (overrides the default 2015–2025 window).",
     )
     parser.add_argument(
         "--year",
@@ -2368,6 +3122,55 @@ if __name__ == "__main__":
         default=CDP_RAW_ROOT,
         help="Root directory containing CDP data in year subdirectories.",
     )
+    parser.add_argument(
+        "--build-cdp-trucost-factset-common",
+        action="store_true",
+        help=(
+            "Build the 2016--2025 CDP--Trucost--FactSet intersection from "
+            "annual CDP Summary sheets, then export balanced-company lists."
+        ),
+    )
+    parser.add_argument(
+        "--build-cdp-climate-panel",
+        action="store_true",
+        help=("Match 2016--2025 CDP/Trucost/FactSet/LSEG and export selected "
+              "CDP questionnaire answers plus emissions and ESG."),
+    )
+    parser.add_argument(
+        "--refresh-cdp-climate-fields",
+        action="store_true",
+        help="Replace compact CDP fields with columns from the saved question-answer extract.",
+    )
+    parser.add_argument(
+        "--cdp-common-output-dir",
+        type=Path,
+        default=CDP_TRUCOST_FACTSET_OUTPUT_DIR,
+        help=(
+            "Output directory for --build-cdp-trucost-factset-common "
+            "artifacts."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-matched-panel-cache",
+        action="store_true",
+        help="Rebuild the cached Trucost–LSEG–FactSet name-match panel.",
+    )
+    parser.add_argument(
+        "--refresh-cached-lseg-revenue",
+        action="store_true",
+        help=(
+            "Refresh only LSEG revenue in the existing matched-panel cache; "
+            "does not re-run Trucost or FactSet matching."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-cached-trucost-scope-2",
+        action="store_true",
+        help=(
+            "Add separate location- and market-based Scope 2 emissions to "
+            "the existing matched-panel cache without re-running name matching."
+        ),
+    )
     args = parser.parse_args()
 
     if (
@@ -2379,12 +3182,48 @@ if __name__ == "__main__":
     selected_year = (
         args.year_option if args.year_option is not None else args.year
     )
-    selected_years = [selected_year] if selected_year is not None else None
+    selected_years = (
+        [selected_year] if selected_year is not None else DEFAULT_SEARCH_YEARS
+    )
+    if args.build_cdp_trucost_factset_common:
+        build_cdp_trucost_factset_common_panel(
+            years=CDP_TRUCOST_FACTSET_YEARS,
+            cdp_root=args.cdp_root,
+            output_dir=args.cdp_common_output_dir,
+        )
+        raise SystemExit(0)
+    if args.build_cdp_climate_panel:
+        try:
+            from .cdp_climate_company_panel import build_climate_panel
+        except ImportError:
+            from src.cdp_extraction.cdp_climate_company_panel import build_climate_panel
+        build_climate_panel(args.cdp_root, MATCHED_PANEL_CACHE_PATH)
+        raise SystemExit(0)
+    if args.refresh_cdp_climate_fields:
+        try:
+            from .cdp_climate_company_panel import refresh_harmonized_panel
+        except ImportError:
+            from src.cdp_extraction.cdp_climate_company_panel import refresh_harmonized_panel
+        refresh_harmonized_panel()
+        raise SystemExit(0)
+    if args.refresh_cached_lseg_revenue:
+        refresh_cached_lseg_revenue(
+            requested_years=set(selected_years),
+        )
+        raise SystemExit(0)
+    if args.refresh_cached_trucost_scope_2:
+        refresh_cached_trucost_scope_2(
+            requested_years=set(selected_years),
+        )
+        raise SystemExit(0)
     common_companies = find_common_companies(
         years=selected_years,
         cdp_path=args.cdp_path,
         cdp_root=args.cdp_root,
+        refresh_matched_panel_cache=args.refresh_matched_panel_cache,
     )
+    output_window = str(selected_year) if selected_year is not None else "2015_2025"
+    OUTPUT_PATH = PROJECT_ROOT / f"data/processed/data_engine_last_{output_window}.csv"
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     common_companies.to_csv(OUTPUT_PATH, index=False)
 
@@ -2407,6 +3246,5 @@ if __name__ == "__main__":
             )
             .sort_values("year")
         )
-        print(common_by_year.to_string(index=False))
 
     print(f"\nSaved {len(common_companies):,} company-year rows to {OUTPUT_PATH}")

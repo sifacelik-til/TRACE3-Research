@@ -19,11 +19,11 @@ import numpy as np
 import pandas as pd
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 FACTSET_DIR = ROOT / "data" / "raw" / "FactSet"
 TRUCOST_DIR = ROOT / "data" / "raw" / "Trucost (Access through WRDS)"
 CDP_DIR = ROOT / "data" / "raw" / "CDP"
-OUT_DIR = ROOT / "data" / "outputs"
+OUT_DIR = ROOT / "data" / "outputs" / "dataset_readers"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 YEARS = list(range(2019, 2025))

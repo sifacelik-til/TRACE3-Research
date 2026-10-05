@@ -8,11 +8,11 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 from rapidfuzz import fuzz, process
 
 root = Path(r'C:\Users\scelik\Desktop\TRACE3Code')
-node_path = root / 'data' / 'outputs' / 'requested_supplychain_networks' / '6501_Hitachi_Ltd.' / 'nodes.csv'
+node_path = root / 'data' / 'outputs' / 'dataset_readers' / 'requested_supplychain_networks' / '6501_Hitachi_Ltd.' / 'nodes.csv'
 tr_path = next((root / 'data' / 'raw').rglob('*trucost*.csv'))
-source_wb = root / 'data' / 'outputs' / 'requested_supplychain_networks' / '6501_Hitachi_Ltd_company_profile.xlsx'
-new_wb = root / 'data' / 'outputs' / 'requested_supplychain_networks' / '6501_Hitachi_Ltd_company_profile_with_network_cdp.xlsx'
-out_csv = root / 'data' / 'outputs' / 'requested_supplychain_networks' / 'hitachi_network_top100_emissions_and_cdp_categories.csv'
+source_wb = root / 'data' / 'outputs' / 'dataset_readers' / 'requested_supplychain_networks' / '6501_Hitachi_Ltd_company_profile.xlsx'
+new_wb = root / 'data' / 'outputs' / 'dataset_readers' / 'requested_supplychain_networks' / '6501_Hitachi_Ltd_company_profile_with_network_cdp.xlsx'
+out_csv = root / 'data' / 'outputs' / 'dataset_readers' / 'requested_supplychain_networks' / 'hitachi_network_top100_emissions_and_cdp_categories.csv'
 
 section_labels = {
     'C1': 'C1 Governance',

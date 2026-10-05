@@ -23,7 +23,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         default=None,
-        help="Output Excel path. Default: data/outputs/<factset_id>_emissions_profile.xlsx",
+        help="Output Excel path. Default: data/outputs/dataset_readers/<factset_id>_emissions_profile.xlsx",
     )
     args = parser.parse_args()
 
@@ -37,4 +37,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

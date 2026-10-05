@@ -1,0 +1,265 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=0.8in]{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,urlcolor=blue,linkcolor=black}
+\title{CDP NLP Clustering: Empirical Comparison and Conditional Method Choice}
+\author{}
+\date{29 September 2026}
+\begin{document}
+\maketitle
+
+\section{Decision}
+Choose \textbf{multilingual MiniLM embeddings with k-means as the provisional
+main method for organizing eligible responses for human review}.
+Retain TF--IDF/NMF as the lexical robustness comparator and the density
+method for discovering coherent subsets with explicit abstention.
+This is a choice conditional on wanting broad response coverage and
+more than a few coarse groups, not evidence that k-means has the highest
+human-label accuracy. The 2024 results show only moderate initialization
+stability and weak separation. None of the tested systems is ready to
+replace the proposed multi-label human codebook.
+
+The verification evaluates clustering methods on the existing multilingual
+MiniLM embeddings. It does \emph{not} establish the best current embedding
+model or state-of-the-art performance. Multilingual E5, BGE-M3, and Qwen3
+Embedding are credible newer encoder candidates, but were not run here.
+
+\section{What was actually run}
+The new script is \path{src\cdp_text_clustering\verify_cdp_clustering_choice.py}.
+It runs three methods on six datasets at five initialization seeds
+(42--46): \textbf{90 fits}, plus 18 single-seed k-means granularity checks.
+The three methods are TF--IDF/NMF, direct cached MiniLM/k-means, and
+MiniLM/UMAP/HDBSCAN. The last reproduces BERTopic's \emph{clustering core},
+not its topic-word representation or a newly executed full BERTopic package.
+The earlier repository benchmark contains actual BERTopic runs.
+
+For each dataset, companies connected through identical normalized text
+are grouped together. The script deduplicates normalized text, selects
+at most 1,800 responses, then creates a fixed approximately 80/20
+group holdout. No company or normalized-exact-text group crosses
+training and holdout \emph{within a dataset}. Separate datasets are not
+independent replications: in particular, their 2024 initiative populations
+overlap. Near duplicates and corporate-parent relationships are not resolved.
+The holdout is reused across seeds and granularity checks, so this is
+development-stage internal validation, not an untouched final test.
+
+\begin{center}
+\small
+\begin{tabular}{lrrr}
+\toprule
+Dataset & Available cached rows & Training & Holdout \\
+\midrule
+2016--2024 initiatives & 1,800 & 1,440 & 359 \\
+2016--2024 risks & 1,800 & 1,437 & 363 \\
+2016--2024 opportunities & 1,800 & 1,458 & 342 \\
+2024 Q7.55.2 comments & 10,545 & 1,440 & 360 \\
+2024 Q7.55.3 comments & 11,695 & 1,444 & 356 \\
+2024 Q7.55.4 explanations & 580 & 463 & 116 \\
+\bottomrule
+\end{tabular}
+\end{center}
+One extra normalized duplicate is removed from the longitudinal initiative
+sample and from Q7.55.4. Longitudinal texts include structured questionnaire
+options; 2024 inputs are narratives only. Their score differences cannot
+isolate the effect of removing structured options because populations and
+embedding settings also differ. The longitudinal encoder cache records
+256 tokens; the 2024 script did not explicitly record a sequence limit.
+
+K-means and NMF use 12 groups, except six for Q7.55.4.
+UMAP uses 15 neighbors, five dimensions, cosine distance, and zero
+minimum distance. HDBSCAN uses minimum cluster size 25 (15 for Q7.55.4)
+and minimum samples one. These are a bounded comparison, not an exhaustive
+hyperparameter search. K-means uses ten initializations per seed.
+NMF uses NNDSVD with small random initialization perturbations; high
+stability under these perturbations does not imply resampling stability.
+
+\section{New comparison results}
+The following are means over five seeds. Semantic silhouette is evaluated
+in the shared MiniLM space; lexical silhouette uses training-fitted
+TF--IDF. Each space favors methods operating in that space.
+Density silhouettes exclude unassigned responses.
+
+\begin{center}
+\small
+\begin{tabular}{llrrrr}
+\toprule
+Dataset & Method & Outliers (\%) & Sem. sil. & Lex. sil. & Seed ARI \\
+\midrule
+Long. initiatives & NMF & 0.0 & 0.078 & 0.062 & 1.000 \\
+ & k-means & 0.0 & 0.131 & 0.059 & 0.782 \\
+ & Density & 19.4 & 0.142 & 0.073 & 0.989 \\
+\addlinespace
+Long. risks & NMF & 0.0 & -0.008 & 0.038 & 1.000 \\
+ & k-means & 0.0 & 0.073 & 0.017 & 0.668 \\
+ & Density & 0.0 & 0.169 & 0.028 & 0.996 \\
+\addlinespace
+Long. opportunities & NMF & 0.0 & 0.014 & 0.027 & 0.807 \\
+ & k-means & 0.0 & 0.055 & 0.008 & 0.601 \\
+ & Density & 38.9 & 0.065 & 0.026 & 0.464 \\
+\addlinespace
+Q7.55.2 & NMF & 5.6 & -0.062 & 0.016 & 0.854 \\
+ & k-means & 0.0 & 0.060 & 0.009 & 0.600 \\
+ & Density & 44.8 & 0.027 & -0.002 & 0.925 \\
+\addlinespace
+Q7.55.3 & NMF & 5.6 & -0.043 & 0.027 & 0.782 \\
+ & k-means & 0.0 & 0.044 & 0.002 & 0.516 \\
+ & Density & 54.9 & 0.044 & 0.008 & 0.914 \\
+\addlinespace
+Q7.55.4 & NMF & 6.9 & -0.071 & 0.060 & 1.000 \\
+ & k-means & 0.0 & 0.047 & -0.006 & 0.544 \\
+ & Density & 81.2 & 0.037 & 0.005 & 0.695 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{How to read stability.}
+ARI is adjusted Rand index between assignments to the same held-out
+responses across different seeds; one means identical partitions.
+For methods with abstention, the displayed ARI uses responses assigned
+by \emph{both} runs. The mean common-assigned fractions for density are
+73.4\% (longitudinal initiatives), 100\% (risks), 45.4\% (opportunities),
+45.1\% (Q7.55.2), 34.9\% (Q7.55.3), and only 11.6\% (Q7.55.4).
+High conditional stability therefore does not imply whole-population
+stability. All seed-pair metrics and noise-inclusive ARI are saved.
+The ten pairwise comparisons are dependent and are not confidence intervals.
+
+\paragraph{Why not simply choose the highest score?}
+The density model gives longitudinal risks just \emph{two groups in every
+run}. Its excellent stability and silhouette describe a coarse partition,
+not a detailed 12-category taxonomy. For longitudinal opportunities,
+density discovers between two and twenty groups across seeds.
+For 2024 narratives, it rejects a large majority of Q7.55.3 and Q7.55.4
+holdout responses. Density remains useful for coherent subsets.
+
+NMF is more lexically separated and often more initialization-stable.
+Its English word analyzer is disadvantaged on multilingual free text:
+5.6--6.9\% of the 2024 holdout responses have effectively zero topic weights.
+These are explicitly unassigned, rather than silently mapped to topic zero.
+Negative semantic silhouettes do not alone prove incorrect labels.
+
+K-means supplies broad coverage and finer resolution, with better semantic
+separation than NMF on all six datasets, but that comparison is partly
+representation-dependent. It also \emph{forces} a nearest-centroid label.
+Neither zero outliers nor moderate ARI proves substantive correctness.
+If interpretability or reliable abstention is the primary objective,
+the preferred method may change.
+
+\paragraph{Number of groups is not validated.}
+The eight-group k-means sensitivity runs have higher semantic silhouette
+than the twelve-group runs on all five applicable datasets. For Q7.55.2,
+the seed-42 values are 0.063 at eight groups, 0.046 at twelve, and 0.049
+at sixteen. Twelve groups are retained as the existing fine-grained
+reference specification, not declared optimal. Fewer groups can improve
+separation merely by merging distinct themes. Human granularity judgments
+and resampling stability are needed before freezing the number of codes.
+
+\section{Selected reference outputs: 2024 initiatives}
+The seed-42 training-fitted k-means model was used to assign all 10,545
+eligible cached Q7.55.2 responses directly from their embeddings.
+It was \emph{not} refitted on holdout rows, and it does not assign the
+7,852 initiative rows excluded by the original 80-character threshold.
+The counts below describe that eligible population, not all companies
+or all CDP initiatives. Topic IDs are new and do not match the prior
+BERTopic or longitudinal hybrid topic IDs.
+
+\begin{center}
+\small
+\begin{tabular}{rlr}
+\toprule
+ID & Draft English interpretation & Responses \\
+\midrule
+0 & Air and cooling system efficiency & 985 \\
+1 & Renewable electricity procurement & 944 \\
+2 & Quantified savings and investment narratives & 996 \\
+3 & Heat, steam, and fuel efficiency & 720 \\
+4 & General operational emissions-reduction measures & 813 \\
+5 & LED and lighting upgrades & 647 \\
+6 & Fleet electrification and vehicle efficiency & 683 \\
+7 & Travel, workplaces, and organizational changes & 1,010 \\
+8 & Solar generation projects & 890 \\
+9 & Waste, materials, and circularity & 685 \\
+10 & Energy-management and efficiency programs & 1,050 \\
+11 & Broad carbon-reduction and savings narratives & 1,122 \\
+\midrule
+ & Total & 10,545 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+These English labels are AI drafts based on automatic words and selected
+source examples, not independent human validation. Groups 2, 4, 7, 10,
+and 11 particularly need splitting, merging, or multi-label coding.
+Some distinguish reporting style or project portfolios rather than a
+single mechanism. A solar representative describes a planned project,
+illustrating that topic membership does not establish implementation status.
+Examples and source text remain available for checking every label.
+
+The no-active-initiative explanations remain unsuitable for automatic
+substantive classification without review: example clusters still show
+language-related patterns and multiple barriers in one answer.
+Human coding of all 580 eligible explanations remains the recommendation.
+
+\section{Modern encoders versus verified local results}
+\begin{center}
+\small
+\begin{tabular}{lp{8.8cm}}
+\toprule
+Encoder & Relevant primary-source information \\
+\midrule
+Multilingual E5-base & 768 dimensions, 512-token input example; its authors
+recommend the \texttt{query:} prefix for clustering features. \\
+BGE-M3 & 1024-dimensional dense representation, over 100 languages,
+up to 8192 tokens; much of its published evidence concerns retrieval. \\
+Qwen3-Embedding-0.6B & 100+ languages, 32k context, up to 1024 dimensions;
+its model card includes clustering among supported tasks. \\
+\bottomrule
+\end{tabular}
+\end{center}
+These model-card capabilities motivate a future paired encoder comparison;
+they are not CDP clustering results. The Qwen card's leaderboard claim
+refers to the 8B model and June 2025, not the 0.6B model's current rank.
+No live leaderboard rank was verified. The current experiment cannot
+honestly establish a 2026 state-of-the-art winner.
+
+Primary sources:
+\url{https://huggingface.co/intfloat/multilingual-e5-base},
+\url{https://huggingface.co/BAAI/bge-m3}, and
+\url{https://huggingface.co/Qwen/Qwen3-Embedding-0.6B}.
+
+\section{Artifacts, reproducibility, and remaining verification}
+All new results are under
+\path{data/outputs/cdp_text_clustering/cdp_clustering_verification_20260929/}.
+\texttt{comparison\_summary.csv} contains the comparison;
+\texttt{metrics\_by\_seed.csv} and
+\texttt{stability\_seed\_pairs.csv} contain the underlying diagnostics.
+\texttt{split\_manifest.csv}, \texttt{dataset\_audit.csv}, and
+\texttt{metadata.json} record splits, source checksums, and package versions.
+The \texttt{q7\_55\_2\_draft\_english\_labels.csv} file keeps proposed
+English interpretations separate from machine assignments.
+
+Each dataset has seed-42 k-means assignments, a serialized model, summary,
+and centroid-nearest plus random training examples.
+The longitudinal exports contain only the 1,800 cached responses per type,
+\emph{not} a refit or replacement of the 314,298-row hybrid corpus.
+The 2024 exports contain all 10,545, 11,695, and 580 eligible cached rows.
+Original assignment files and the user's pilot annotations remain unchanged.
+The pilot's human annotations were not used for fitting or accuracy claims;
+their original source texts may occur in the unsupervised sample.
+
+The saved predictions were checked against reloaded models; source IDs,
+full narrative text, cluster totals, all 90 seed/method records, and
+company/exact-text split separation were verified.
+Package versions are NumPy 2.4.6, pandas 3.0.5, scikit-learn 1.6.1,
+UMAP 0.5.7, HDBSCAN 0.8.40, and SciPy 1.17.1.
+These differ from the earlier benchmark environment; do not interpret
+changes from that benchmark as a controlled estimate of the grouping effect.
+The script refuses to overwrite an existing nonempty output directory;
+pass a new \texttt{--output} directory for reruns.
+
+The next scientific validation is independent, blinded, multi-label human
+coding, including non-English and uncertain cases, followed by
+company-resampling and temporal-transfer checks. Until then, the method
+choice is supported for \emph{exploratory organization}, not verified
+measurement of actual abatement or a universally best NLP classifier.
+\end{document}

@@ -75,30 +75,19 @@ Trucost/
 ## Project Structure
 
 ```
-CDP-Data-Analysis/
-├── README.md (this file)
-├── SETUP.md (quick start guide)
-├── requirements.txt
-├── .gitignore
-├── notebooks/
-│   ├── 01_data_exploration.ipynb
-│   ├── 02_climate_analysis.ipynb
-│   ├── 03_biodiversity_analysis.ipynb
-│   ├── 04_temporal_trends.ipynb
-│   └── 05_factset_trucost_analysis.ipynb (NEW!)
-├── src/
-│   ├── data_loader.py (CDP, FactSet, Trucost loaders)
-│   ├── data_processor.py
-│   └── utils.py
-├── data/
-│   ├── raw/ (Links to source data)
-│   ├── processed/ (Cleaned data exports)
-│   └── outputs/ (Analysis results)
-└── docs/
-    ├── data_dictionary.md
-    ├── analysis_notes.md
-    └── methodology.md
+src/
+├── dataset_readers/       # CDP, FactSet, LSEG and Trucost readers/integration
+├── cdp_extraction/        # CDP answer extraction and dataset preparation
+├── cdp_text_clustering/   # CDP text coding, clustering and benchmarks
+├── MDP/                   # MDP state-variable analysis
+├── audit.py               # Cross-source missing-data audit
+├── supply_chain_emissions_detail.py
+├── target_emissions_profile.py
+└── utils.py
 ```
+
+See [`src/README.md`](src/README.md) for package details and the recommended
+command-line invocation pattern.
 
 ## Setup Instructions
 
@@ -145,11 +134,11 @@ py src\supply_chain_emissions_detail.py --factset_id <ID> --build_both
 ```
 
 ```bash
-py src\extract_cdp_org_answers_2014_2024.py --factset-id "000VJS-E" --start-year 2014 --end-year 2024
+py -m src.cdp_extraction.extract_cdp_org_answers_2014_2024 --factset-id "000VJS-E" --start-year 2014 --end-year 2024
 ```
 
 ```bash
-py src\extract_cdp_org_answers_2014_2024.py --org-name "ASM International" --start-year 2014 --end-year 2024
+py -m src.cdp_extraction.extract_cdp_org_answers_2014_2024 --org-name "ASM International" --start-year 2014 --end-year 2024
 ```
 
 ### CDP Analysis
@@ -167,7 +156,7 @@ py src\extract_cdp_org_answers_2014_2024.py --org-name "ASM International" --sta
   industry mix of their suppliers instead of by the companies' own industries:
 
 ```bash
-py src\supplier_composition_clustering.py --clusters 8 --min-suppliers 3
+py -m src.dataset_readers.supplier_composition_clustering --clusters 8 --min-suppliers 3
 ```
 
 This writes long and wide company composition tables, company cluster
@@ -193,18 +182,18 @@ not suitable.
 ## CDP initiative coding and sector labels
 
 The development review in `data\outputs\cdp_field_chunks_minilm_development`
-uses `src\data_engine\cdp_initiative_review.json` for evidence-linked suggestions
+uses `src\cdp_text_clustering\cdp_initiative_review.json` for evidence-linked suggestions
 for the 182 nonblank initiative comments (`longitudinal_initiative` and
 `q7_55_2`). Reproduce it from the repository root with:
 
 ```powershell
-python src\data_engine\review_cdp_initiatives.py
+python -m src.cdp_text_clustering.review_cdp_initiatives
 ```
 
 `coding_candidates.jsonl` contains revised initiative suggestions with exact
 character offsets into `fields.jsonl`; other datasets retain their original
 retrieval suggestions. `coding_template.csv` is populated with one row per
-suggested code, still **pending human review**. Enter a reviewer ID and change
+suggested code, still. Enter a reviewer ID and change
 the status to `accepted` only after checking the evidence. Nonblank template
 work is preserved on reruns, including pending edits. To refresh a field's
 suggestions, clear its code, evidence, notes and reviewer fields and set its
@@ -244,7 +233,7 @@ stage, described in `reports\cdp_field_chunking_workflow.tex`. Using the configu
 project Python environment:
 
 ```powershell
-python src\data_engine\cluster_cdp_fields_by_sector.py
+python -m src.cdp_text_clustering.cluster_cdp_fields_by_sector
 ```
 
 This reuses the full run in `data\outputs\cdp_field_chunks_20261001` and writes
@@ -265,18 +254,17 @@ Missing-sector, sparse, blank and unsupported records have explicit unclustered
 statuses. Reviewed initiative codes remain separate pending suggestions: they
 do not train the model or get propagated to unreviewed cluster members.
 `cohort_metrics.csv`, `granularity_search.csv` and saved models provide the
-selection diagnostics and reproducibility details. Original model outputs and
-human coding work are not overwritten.
+selection diagnostics and reproducibility details. 
 
 ## CDP section encoder benchmark, 2020-2025
 
-`src\data_engine\benchmark_cdp_sections.py` runs the four-encoder comparison on
+`src\cdp_text_clustering\benchmark_cdp_sections.py` runs the four-encoder comparison on
 the targets/performance, risks/opportunities and engagement section datasets.
 Use the configured project Python environment with the installed encoder
 dependencies and pinned local model weights:
 
 ```powershell
-python src\data_engine\benchmark_cdp_sections.py --stage all
+python -m src.cdp_text_clustering.benchmark_cdp_sections --stage all
 ```
 
 The output is `data\outputs\cdp_sections_benchmark_2020_2025`.
@@ -298,23 +286,8 @@ Generate the completed-benchmark comparison figures without restarting full
 deployment:
 
 ```powershell
-python src\data_engine\benchmark_cdp_sections.py --stage figures
+python -m src.cdp_text_clustering.benchmark_cdp_sections --stage figures
 ```
-
-Vector PDFs and preview PNGs in `data\outputs\cdp_sections_benchmark_2020_2025\figures`
-compare selection/verification scores, sector-field cohorts, complete text versus
-truncated prefixes, and measured CPU time/truncation. Scores **include the -1
-penalty** for undefined or unsupported partitions; the ablation chart shows how
-many cohorts produced defined silhouettes. The figures are embedded in the
-manuscript and do not assert human coding accuracy or completed full clustering.
-
-The automatically updated manuscript is
-`reports\cdp_sections_encoder_benchmark_msom.tex`. It is an anonymous,
-MSOM-oriented methodological draft and explicitly marks missing results.
-It does not claim human coding accuracy or publication-ready validation.
-The 82-code section vocabulary includes engagement mechanisms; all generated
-code/span suggestions remain pending human review. Environmental-unspecified
-answers and missing/invalid sectors retain explicit flags.
 
 ## CDP item-level classification benchmark
 
@@ -327,7 +300,7 @@ four detail sheets in the workbook exactly.
 Extract the labels and validate the workbook before a benchmark run:
 
 ```powershell
-python src\data_engine\cdp_detail_output.py extract-validation `
+python -m src.cdp_text_clustering.cdp_detail_output extract-validation `
   --workbook data\processed\cdp_section_datasets\cdp_classification_all_details.xlsx `
   --output data\processed\cdp_section_datasets\cdp_validation_detail_labels.jsonl.gz `
   --contract data\processed\cdp_section_datasets\cdp_detail_output_contract.json
@@ -344,7 +317,7 @@ the required models available, then run a small smoke test:
 
 ```powershell
 $env:CDP_LLM_API_KEY = "ollama"
-python src\data_engine\benchmark_cdp_detail_models.py `
+python -m src.cdp_text_clustering.benchmark_cdp_detail_models `
   --base-url http://localhost:11434/v1 `
   --models <local-model-name> `
   --limit 8 `
@@ -356,7 +329,7 @@ If the endpoint does not accept `response_format`, add
 company-grouped five-fold benchmark:
 
 ```powershell
-python src\data_engine\benchmark_cdp_detail_models.py `
+python -m src.cdp_text_clustering.benchmark_cdp_detail_models `
   --base-url http://localhost:11434/v1 `
   --models <model-one> <model-two> <model-three> `
   --folds 5 `
@@ -384,20 +357,6 @@ actions, Engagement details, Risk details and Opportunity details.
 - matplotlib/seaborn (for visualization)
 - jupyter (for notebooks)
 
-## Next Steps
 
-1. Explore the data using the notebooks
-2. Load and examine the glossary/data dictionary
-3. Clean and standardize data for analysis
-4. Develop custom analysis workflows
-5. Generate visualizations and reports
-
-## Notes
-
-- Data files are large (Parquet format recommended for efficiency)
-- ISIN versions contain company ticker information; non-ISIN versions are anonymized
-- Multiple response types per company per year are possible
-
----
 
 Last Updated: 2026-08-18
