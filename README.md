@@ -1,6 +1,8 @@
 # TRACE3Code Project
 
-A comprehensive Python project for analyzing multiple ESG data sources: CDP, FactSet, and Trucost.
+A Python research project for integrating CDP, FactSet, LSEG, and S&P Global
+Trucost data to study corporate emissions, supply chains, and decarbonisation
+decisions.
 
 ## Project Overview
 
@@ -16,19 +18,28 @@ This project integrates and analyzes multiple corporate ESG data sources:
 - **Hub Data**: Financial and operational metrics
 - **Symbol Data**: Security identifiers (ISIN, CUSIP, ticker symbols)
 
+### LSEG Data
+- **Firm characteristics**: Revenue, profitability, employment, and industry classifications
+- **Sustainability indicators**: ESG scores, environmental policies, targets, and governance measures
+
 ### Trucost Data (via WRDS)
-- **GHG Data**: Greenhouse gas emissions data (2011-2024)
-- **Non-GHG Data**: Environmental cost and impact metrics (2011-2024)
+- **Current research extract**: `trucost_2026_2015_onward.csv.gz`, filtered from `trucost_2026_new.dta`
+- **GHG measures**: Absolute and intensity measures for Scope 1, location- and market-based Scope 2, and upstream and downstream Scope 3
+- **Analysis window**: The maintained integration pipeline targets fiscal years 2015–2025
 
 ## Data Sources
 
 ### Primary Paths
 
-**CDP Data**: `C:\Users\scelik\OneDrive - Tilburg University\Desktop\TRACE3\Data\CDP`
+Paths are resolved relative to the repository root:
 
-**FactSet Data**: `C:\Users\scelik\OneDrive - Tilburg University\Desktop\TRACE3\Data\FactSet`
+- **CDP**: `data/raw/CDP`
+- **FactSet**: `data/raw/FactSet`
+- **LSEG**: `data/raw/LSEG/lseg_full_universe.csv`
+- **Trucost**: `data/raw/Trucost (Access through WRDS)`
 
-**Trucost Data**: `C:\Users\scelik\OneDrive - Tilburg University\Desktop\TRACE3\Data\Trucost (Access through WRDS)`
+The large licensed source files are local inputs and are not expected to be
+stored in Git.
 
 ### CDP Structure
 
@@ -66,10 +77,11 @@ FactSet/
 
 ```
 Trucost/
-├── 260710 trucost pulic-ghg-2011to24.csv (GHG emissions data)
-├── 260710 trucost pulic-ghg-2011to24.dta (Same as CSV in Stata format)
-├── 260710 trucost pulic-nonghg-2011to24.csv (Non-GHG environmental metrics)
-└── 260710 trucost pulic-nonghg-2011to24.dta (Same as CSV in Stata format)
+├── trucost_2026_new.dta                  # Full 2026 WRDS delivery
+├── trucost_2026_2015_onward.csv.gz       # Preferred filtered research input
+├── trucost_environmental_data_item_list.xlsx
+├── 260710 trucost pulic-ghg-2011to24.*    # Earlier GHG extract
+└── 260710 trucost pulic-nonghg-2011to24.* # Earlier non-GHG extract
 ```
 
 ## Project Structure
@@ -82,12 +94,85 @@ src/
 ├── MDP/                   # MDP state-variable analysis
 ├── audit.py               # Cross-source missing-data audit
 ├── supply_chain_emissions_detail.py
-├── target_emissions_profile.py
 └── utils.py
 ```
 
 See [`src/README.md`](src/README.md) for package details and the recommended
 command-line invocation pattern.
+
+## Data readers and integration
+
+The maintained integration entry point is
+[`src/dataset_readers/common_companies_by_year.py`](src/dataset_readers/common_companies_by_year.py).
+It reads Trucost and LSEG in chunks, resolves company identifiers, matches
+FactSet entities, and optionally adds CDP records. Expensive Trucost–LSEG–
+FactSet matches are cached in
+`data/processed/trucost_lseg_factset_matched_2015_2025.csv.gz`.
+
+| Module | Role |
+| --- | --- |
+| `common_companies_by_year.py` | Maintained cross-source matching and panel construction command |
+| `common_company_names_for_year.py` | Inspect matched company names for one year |
+| `cdp_read.py` | Shared parsers for legacy CDP Excel files and recent Parquet extracts |
+| `cdp_reader.py` | Export one organization's CDP answers across years |
+| `cdp_theme_taxonomy.py` | Shared mapping from CDP questions and text to climate themes |
+| `lseg_esg_extract_api.py` | Refresh the local LSEG ESG extract through the LSEG API |
+| `company_panel_persistence.py` | Measure continuous company coverage across sources |
+| `plot_company_year_venn.py` | Report annual overlap among CDP, FactSet, LSEG, and Trucost |
+| `supplier_factset_lseg_analysis.py` | Construct supplier characteristics from FactSet and matched ESG/emissions data |
+| `supplier_composition_clustering.py` | Build supplier-sector composition groups |
+| `report_builder.py` | Shared data access for company-level emissions reports |
+| `target_emissions_profile.py` | Command-line wrapper for company emissions-profile reports |
+
+Build the default 2015–2025 Trucost–LSEG–FactSet panel:
+
+```powershell
+python -m src.dataset_readers.common_companies_by_year --refresh-matched-panel-cache
+```
+
+Subsequent runs reuse the cache unless the refresh flag is supplied. Other
+supported operations include:
+
+```powershell
+# Build the 2016–2025 CDP–Trucost–FactSet intersection.
+python -m src.dataset_readers.common_companies_by_year --build-cdp-trucost-factset-common
+
+# Build the four-source climate panel.
+python -m src.dataset_readers.common_companies_by_year --build-cdp-climate-panel
+
+# Add separate location- and market-based Scope 2 values to the cache.
+python -m src.dataset_readers.common_companies_by_year --refresh-cached-trucost-scope-2
+
+# Extract one organization's CDP answers.
+python -m src.dataset_readers.cdp_reader --org-name "ASM International" --start-year 2016 --end-year 2025
+```
+
+### Trucost fields used by the maintained reader
+
+The preferred filtered Trucost file contains 37 columns. The integration
+pipeline selects company identifiers, fiscal year, reporting date, industry,
+revenue, and the following emissions measures:
+
+| Measure | Trucost field |
+| --- | --- |
+| Revenue | `di_319522` |
+| Scope 1 absolute emissions | `di_319413` |
+| Scope 2 location-based absolute emissions | `di_319414` |
+| Scope 2 market-based absolute emissions | `di_367750` |
+| Scope 3 upstream absolute emissions | `di_319415` |
+| Scope 3 downstream absolute emissions | `di_326737` |
+| Scope 1 intensity | `di_319407` |
+| Scope 2 location-based intensity | `di_319408` |
+| Scope 2 market-based intensity | `di_368314` |
+| Scope 3 upstream intensity | `di_319409` |
+| Scope 3 downstream intensity | `di_326738` |
+
+Absolute emissions are measured in metric tons of carbon dioxide equivalent.
+The code retains location- and market-based Scope 2 as separate measures;
+`scope_2_emissions` remains an alias for the location-based value for
+compatibility with earlier outputs. `suppliers_emissions` is an alias for
+upstream Scope 3 and does not allocate a supplier's emissions to an individual
+buyer.
 
 ## Setup Instructions
 
@@ -97,12 +182,11 @@ command-line invocation pattern.
 pip install -r requirements.txt
 ```
 
-### 2. Configure Data Path
+### 2. Add licensed source data
 
-Update the data path in your notebooks or scripts to point to:
-```
-C:\Users\scelik\OneDrive - Tilburg University\Desktop\TRACE3\Data\CDP
-```
+Place source files under `data/raw/<source>`. The maintained readers resolve
+these paths from the repository root. Command-line options can override CDP
+and output paths when needed.
 
 ### 3. Launch Jupyter
 
@@ -168,8 +252,9 @@ verified procurement spend; use `--weighting equal` when that distinction is
 not suitable.
 
 ### Trucost Analysis
-- **Emissions Trends**: GHG emissions patterns (2011-2024)
-- **Environmental Costs**: Non-GHG environmental impact metrics
+- **Emissions trends**: Scope-specific GHG emissions over the 2015–2025 research window
+- **Alternative Scope 2 accounting**: Separate location- and market-based measures
+- **Value-chain emissions**: Separate upstream and downstream Scope 3 measures
 - **Longitudinal Tracking**: Company-level emission changes over time
 - **Comparative Analysis**: Cross-company environmental performance
 
